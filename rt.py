@@ -23,6 +23,8 @@ from typing import Any, Optional
 
 import requests
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 CACHE_DB = "cache.db"
 CACHE_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
@@ -38,6 +40,26 @@ USER_AGENT = (
 _THROTTLE_SECONDS = 1.2
 _last_request_at = 0.0
 _throttle_lock = threading.Lock()
+
+
+def _session() -> requests.Session:
+    session = requests.Session()
+    retries = Retry(
+        total=4,
+        connect=4,
+        read=4,
+        status=4,
+        backoff_factor=0.75,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        respect_retry_after_header=True,
+    )
+    session.mount("https://", HTTPAdapter(max_retries=retries))
+    session.headers.update({"User-Agent": USER_AGENT})
+    return session
+
+
+_HTTP = _session()
 
 
 def _throttle() -> None:
@@ -91,7 +113,7 @@ def _cache_set(key: str, value: Any) -> None:
 
 def _get(url: str, **kwargs: Any) -> requests.Response:
     _throttle()
-    resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20, **kwargs)
+    resp = _HTTP.get(url, timeout=(10, 20), **kwargs)
     resp.raise_for_status()
     return resp
 
@@ -307,22 +329,22 @@ def lookup(title: str, year: Optional[int] = None) -> Optional[dict[str, Any]]:
     if not candidates:
         return None
 
-    needle = title.strip().lower()
-    best: Optional[dict[str, Any]] = None
-    for c in candidates:
-        c_title = (c.get("title") or "").strip().lower()
-        if not c_title:
-            continue
-        if year and c.get("year") and c["year"] != year:
-            continue
-        if c_title == needle:
-            best = c
-            break
-        if best is None and needle in c_title:
-            best = c
+    def normalized(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", html_mod.unescape(value).casefold())
 
-    if best is None:
-        best = candidates[0]
+    needle = normalized(title)
+    exact = [c for c in candidates if normalized(c.get("title") or "") == needle]
+    if year is not None:
+        exact_year = [c for c in exact if c.get("year") == year]
+        if exact_year:
+            exact = exact_year
+        else:
+            # An explicit conflicting year is unsafe. A yearless candidate is
+            # acceptable only when it is the sole exact-title result.
+            exact = [c for c in exact if c.get("year") is None]
+    if len(exact) != 1:
+        return None
+    best = exact[0]
 
     slug = best.get("slug")
     if not slug:

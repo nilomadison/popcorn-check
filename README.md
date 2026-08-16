@@ -10,7 +10,7 @@ phone use — large tap targets and expandable "Movie summary" rows.
 |-------------------|----------------------------------------------------------------|
 | `server.py`       | FastAPI app; serves `/` (RT lookup) and `/yt` (YT TV browser)  |
 | `rt.py`           | Rotten Tomatoes search + scorecard parsing + 7-day SQLite cache|
-| `ytv.py`          | JustWatch GraphQL catalog fetch + RT enrichment (yttv.db)      |
+| `ytv.py`          | JustWatch snapshot fetch + RT audience-score enrichment         |
 | `sync_ytv.py`     | Batch/nightly sync entry point                                 |
 | `pc.py`           | CLI Rotten Tomatoes lookup                                     |
 | `cache.db`        | RT lookup cache (search + movie scorecards)                    |
@@ -36,6 +36,17 @@ phone use — large tap targets and expandable "Movie summary" rows.
 An example cron entry that runs `sync_ytv.py` nightly at 4:00 AM is provided
 in `examples/popcorn-check.cron.example`. Update its installation path and log
 destination before adding it with `crontab -e`.
+
+The catalog is the general US inventory that JustWatch associates with its
+YouTube TV package; it is not personalized for a subscriber's location,
+add-ons, recordings, or account entitlements. JustWatch supplies baseline
+metadata and critic scores. Rotten Tomatoes is queried for audience scores and
+missing critic data.
+
+Genre filters use JustWatch's technical genre keys and English display names.
+RT genres are normalized into that vocabulary, supplemented by explicit Anime,
+Biography, Faith & Spirituality, Holiday, and LGBTQ+ categories. Movies without
+genre data from either source appear under `No genre listed`.
 
 ## Run
 

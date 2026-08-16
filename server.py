@@ -261,9 +261,9 @@ details p { margin: 10px 0 0; color: var(--text-muted); font-size: .95rem; }
   transition: border-color .15s, transform .1s;
 }
 .tile:hover { border-color: var(--border-strong); }
-.tile .top { display: flex; gap: 12px; }
+.tile .top { display: flex; align-items: flex-start; gap: 14px; }
 .tile .poster {
-  width: 66px; height: 99px; object-fit: cover; flex: 0 0 auto;
+  width: 32%; height: auto; aspect-ratio: 2 / 3; object-fit: cover; flex: 0 0 auto;
   border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--surface-2);
 }
 .poster-placeholder {
@@ -281,25 +281,19 @@ details p { margin: 10px 0 0; color: var(--text-muted); font-size: .95rem; }
 }
 
 /* In-card score meters */
-.scores2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.scores2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
 .smeter {
   border: 1px solid var(--border); border-radius: var(--radius-sm);
-  background: var(--surface-2); padding: 9px 11px;
+  background: var(--surface-2); padding: 7px 8px;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
 }
-.smeter .k {
-  display: flex; align-items: center; gap: 5px; font-size: .78rem;
-  text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); font-weight: 700;
-}
-.smeter .v { font-size: 1.7rem; font-weight: 800; letter-spacing: -.02em; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.smeter .icon { font-size: 1rem; line-height: 1; }
+.smeter .v { font-size: 1.3rem; font-weight: 800; letter-spacing: -.02em; line-height: 1; font-variant-numeric: tabular-nums; }
 .smeter .v .pct { font-size: .9rem; font-weight: 600; color: var(--text-muted); }
-.smeter .state { font-size: .82rem; font-weight: 700; margin-top: 1px; min-height: 1em; }
 .smeter.critic { border-top: 2px solid var(--tomato); }
 .smeter.critic .v { color: var(--tomato); }
 .smeter.popcorn { border-top: 2px solid var(--butter); }
 .smeter.popcorn .v { color: var(--butter); }
-.smeter .state.fresh { color: var(--fresh); }
-.smeter .state.rotten { color: var(--rotten); }
-.smeter .state.verified { color: var(--butter); }
 
 .tile details { margin-top: 0; }
 .tile details p { font-size: .98rem; }
@@ -406,6 +400,9 @@ function renderMovie(m) {
 
 _YT_PAGE_JS = r"""
 navYt.classList.add('active');
+const genreCatalog = __GENRE_CATALOG__;
+const genreLabels = new Map(genreCatalog.map(g => [g.key, g.label]));
+const NO_GENRE = '__no_genre__';
 app.innerHTML = `
   <h1>YouTube TV movies</h1>
   <p class="lede">Every movie on YouTube TV, with Rotten Tomatoes critics and popcorn scores.</p>
@@ -450,7 +447,7 @@ const more = document.getElementById('more');
 const PAGE = 200;
 
 let all = [];
-let genres = [];          // [name, count][], sorted alphabetically
+let genres = [];          // [{key, label, count}], canonical order
 let selected = new Set();
 let sortMode = 'popular';
 let visible = PAGE;
@@ -462,9 +459,15 @@ async function init() {
     const r = await fetch('/api/yttv');
     if (!r.ok) throw new Error(`Request failed: ${r.status}`);
     all = await r.json();
-    const counts = new Map();
-    for (const x of all) for (const g of (x.genres || [])) counts.set(g, (counts.get(g) || 0) + 1);
-    genres = [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    const counts = new Map(genreCatalog.map(g => [g.key, 0]));
+    let noGenreCount = 0;
+    for (const x of all) {
+      const keys = x.genre_keys || [];
+      if (!keys.length) noGenreCount += 1;
+      for (const key of keys) counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    genres = genreCatalog.map(g => ({...g, count: counts.get(g.key) || 0}));
+    genres.push({key: NO_GENRE, label: 'No genre listed', count: noGenreCount});
     renderGenreList();
     render();
   } catch (error) {
@@ -475,11 +478,11 @@ async function init() {
 }
 
 function renderGenreList() {
-  genreListEl.innerHTML = genres.map(([g, n]) => `
+  genreListEl.innerHTML = genres.map(g => `
     <label class="dd-item">
-      <input type="checkbox" value="${esc(g)}" ${selected.has(g) ? 'checked' : ''}>
-      <span class="gname">${esc(g)}</span>
-      <span class="gcount">${n}</span>
+      <input type="checkbox" value="${esc(g.key)}" ${selected.has(g.key) ? 'checked' : ''}>
+      <span class="gname">${esc(g.label)}</span>
+      <span class="gcount">${g.count}</span>
     </label>`).join('');
   genreListEl.querySelectorAll('input[type=checkbox]').forEach(cb => {
     cb.addEventListener('change', () => {
@@ -493,8 +496,10 @@ function renderGenreList() {
 function updateGenreUI() {
   const n = selected.size;
   genreCountEl.textContent = n ? String(n) : 'All';
-  chipsEl.innerHTML = [...selected].map(g =>
-    `<span class="chip">${esc(g)}<button data-g="${esc(g)}" aria-label="Remove ${esc(g)}">×</button></span>`
+  chipsEl.innerHTML = [...selected].map(key => {
+    const label = key === NO_GENRE ? 'No genre listed' : (genreLabels.get(key) || key);
+    return `<span class="chip">${esc(label)}<button data-g="${esc(key)}" aria-label="Remove ${esc(label)}">×</button></span>`;
+  }
   ).join('');
   chipsEl.querySelectorAll('button').forEach(b => {
     b.addEventListener('click', () => {
@@ -509,7 +514,9 @@ function updateGenreUI() {
 function matches(x) {
   const q = qEl.value.trim().toLowerCase();
   if (q && !(x.title || '').toLowerCase().includes(q)) return false;
-  if (selected.size && !(x.genres || []).some(g => selected.has(g))) return false;
+  const keys = x.genre_keys || [];
+  if (selected.size && !keys.some(key => selected.has(key)) &&
+      !(selected.has(NO_GENRE) && !keys.length)) return false;
   return true;
 }
 
@@ -538,14 +545,11 @@ function render() {
 
 function tile(x) {
   const t = pct(x.tomatometer), p = pct(x.popcornmeter);
-  const fresh = t == null ? '' : (t >= 60 ? 'Fresh' : 'Rotten');
-  const verified = (x.audience_score_type || '').toUpperCase() === 'VERIFIED' ? 'Verified' : '';
   const genreChips = (x.genres || []).map(g => `<span class="gchip">${esc(g)}</span>`).join('');
-  const smeter = (label, icon, val, cls, state, stateCls) => `
-    <div class="smeter ${cls}">
-      <div class="k">${icon} ${label}</div>
+  const smeter = (label, icon, val, cls) => `
+    <div class="smeter ${cls}" aria-label="${label}: ${val == null ? 'not rated' : `${val} percent`}">
+      <span class="icon" aria-hidden="true">${icon}</span>
       <div class="v">${val == null ? '—' : val}<span class="pct">${val == null ? '' : '%'}</span></div>
-      <div class="state ${stateCls}">${state}</div>
     </div>`;
   return `
     <div class="tile">
@@ -556,11 +560,11 @@ function tile(x) {
         <div class="meta">
           <h3>${esc(x.title)}${x.year ? ` <span class="year">(${esc(x.year)})</span>` : ''}</h3>
           ${genreChips ? `<div class="genres">${genreChips}</div>` : ''}
+          <div class="scores2">
+            ${smeter('Critics score', '🍅', t, 'critic')}
+            ${smeter('Audience score', '🍿', p, 'popcorn')}
+          </div>
         </div>
-      </div>
-      <div class="scores2">
-        ${smeter('Critics', '🍅', t, 'critic', fresh, fresh === 'Fresh' ? 'fresh' : 'rotten')}
-        ${smeter('Popcorn', '🍿', p, 'popcorn', verified, 'verified')}
       </div>
       ${x.synopsis ? `<details><summary>Movie summary</summary><p>${esc(x.synopsis)}</p></details>` : ''}
     </div>`;
@@ -597,8 +601,13 @@ def index() -> HTMLResponse:
 
 @app.get("/yt", response_class=HTMLResponse)
 def yt_page() -> HTMLResponse:
+    genre_catalog = json.dumps([
+        {"key": key, "label": label}
+        for key, label in ytv_module.CANONICAL_GENRES
+    ])
+    yt_js = _YT_PAGE_JS.replace("__GENRE_CATALOG__", genre_catalog)
     return HTMLResponse(_SHELL.replace("{css}", _CSS).replace(
-        "</script>\n</body>", _YT_PAGE_JS + "\n</script>\n</body>"))
+        "</script>\n</body>", yt_js + "\n</script>\n</body>"))
 
 
 @app.get("/api/lookup")
@@ -623,27 +632,40 @@ def api_movie(slug: str = Query(...)) -> JSONResponse:
 def api_yttv() -> JSONResponse:
     """Return the full rated catalog (all titles) for client-side filter/sort.
 
-    The /yt page loads everything once (~2,400 titles) and does genre
+    The /yt page loads the active snapshot once and does genre
     filtering, search, and score sorting in the browser for instant response.
     """
-    con = sqlite3.connect(ytv_module.YTTV_DB)
+    # Open through the catalog module so additive schema migrations are applied
+    # even if the web service restarts before the next scheduled sync.
+    con = ytv_module._db()
     try:
         con.row_factory = sqlite3.Row
         rows = con.execute(
-            "SELECT r.title, r.year, r.tomatometer, r.popcornmeter, "
-            "r.audience_score_type, r.genres, r.poster, r.synopsis, "
+            "SELECT c.title, c.year, "
+            "COALESCE(r.tomatometer, c.jw_tomatometer) AS tomatometer, "
+            "r.popcornmeter, r.audience_score_type, "
+            "c.jw_genres, r.genres AS rt_genres, "
+            "COALESCE(r.poster, c.jw_poster) AS poster, "
+            "COALESCE(r.synopsis, c.jw_synopsis) AS synopsis, "
             "c.popularity "
-            "FROM ratings r "
-            "LEFT JOIN catalog c ON c.jw_id = r.jw_id "
+            "FROM catalog c "
+            "LEFT JOIN ratings r ON r.jw_id = c.jw_id "
+            "WHERE c.active = 1 "
             "ORDER BY COALESCE(c.popularity, 999999) ASC"
         ).fetchall()
         out = []
         for row in rows:
             d = dict(row)
-            try:
-                d["genres"] = json.loads(d.get("genres") or "[]")
-            except (TypeError, ValueError):
-                d["genres"] = []
+            def genres_from(column: str) -> list[str]:
+                try:
+                    value = json.loads(d.pop(column) or "[]")
+                    return value if isinstance(value, list) else []
+                except (TypeError, ValueError):
+                    return []
+
+            d["genre_keys"], d["genres"] = ytv_module.canonical_genres(
+                genres_from("jw_genres"), genres_from("rt_genres")
+            )
             out.append(d)
     finally:
         con.close()
