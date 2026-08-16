@@ -325,23 +325,26 @@ def movie(slug: str) -> Optional[dict[str, Any]]:
 
 def lookup(title: str, year: Optional[int] = None) -> Optional[dict[str, Any]]:
     """Search + disambiguate + return a single best-match scorecard."""
-    candidates = search(title)
-    if not candidates:
-        return None
-
     def normalized(value: str) -> str:
         return re.sub(r"[^a-z0-9]+", "", html_mod.unescape(value).casefold())
 
     needle = normalized(title)
-    exact = [c for c in candidates if normalized(c.get("title") or "") == needle]
-    if year is not None:
+    def exact_matches(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        exact = [
+            c for c in candidates if normalized(c.get("title") or "") == needle
+        ]
+        if year is None:
+            return exact
         exact_year = [c for c in exact if c.get("year") == year]
         if exact_year:
-            exact = exact_year
-        else:
-            # An explicit conflicting year is unsafe. A yearless candidate is
-            # acceptable only when it is the sole exact-title result.
-            exact = [c for c in exact if c.get("year") is None]
+            return exact_year
+        # An explicit conflicting year is unsafe. A yearless candidate is
+        # acceptable only when it is the sole exact-title result.
+        return [c for c in exact if c.get("year") is None]
+
+    exact = exact_matches(search(title))
+    if len(exact) != 1 and year is not None:
+        exact = exact_matches(search(f"{title} {year}"))
     if len(exact) != 1:
         return None
     best = exact[0]
@@ -349,7 +352,17 @@ def lookup(title: str, year: Optional[int] = None) -> Optional[dict[str, Any]]:
     slug = best.get("slug")
     if not slug:
         return None
-    return movie(slug)
+    result = movie(slug)
+    if not result:
+        return None
+
+    # Search-result metadata and the linked scorecard can disagree. Never let
+    # a misleading RT search row attach a different movie's enrichment data.
+    if normalized(result.get("title") or "") != needle:
+        return None
+    if year is not None and _to_int(result.get("year")) != year:
+        return None
+    return result
 
 
 if __name__ == "__main__":

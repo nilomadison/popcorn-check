@@ -1,9 +1,12 @@
-"""YouTube TV catalog snapshot sync and Rotten Tomatoes enrichment."""
+"""Streaming-provider catalog snapshot sync and Rotten Tomatoes enrichment."""
 
 from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -12,6 +15,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 import rt
+import tmdb as tmdb_module
 
 YTTV_DB = "yttv.db"
 GRAPHQL_URL = "https://apis.justwatch.com/graphql"
@@ -25,7 +29,28 @@ COUNTRY = "US"
 LANGUAGE = "en"
 PAGE_SIZE = 100
 MAX_PAGES = 100  # Circuit breaker; completion comes from hasNextPage.
+JW_RESULT_WINDOW_LIMIT = 1900
+MIN_RELEASE_YEAR = 0
+MAX_RELEASE_YEAR = 9999
 RT_RETRY_DAYS = 7
+TMDB_RETRY_DAYS = 30
+JW_THROTTLE_SECONDS = 0.75
+
+
+@dataclass(frozen=True)
+class Provider:
+    key: str
+    name: str
+    jw_package: str
+
+
+PROVIDERS: dict[str, Provider] = {
+    "youtube_tv": Provider("youtube_tv", "YouTube TV", PACKAGE_YTT),
+    "netflix": Provider("netflix", "Netflix", "nfx"),
+}
+
+_last_jw_request_at = 0.0
+_jw_throttle_lock = threading.Lock()
 
 # JustWatch's US-English genre vocabulary plus the five RT-only categories we
 # intentionally expose. Keys are stable API/filter values; labels are display
@@ -53,6 +78,7 @@ CANONICAL_GENRES: tuple[tuple[str, str], ...] = (
     ("romance", "Romance"),
     ("scifi", "Science-Fiction"),
     ("sport", "Sport"),
+    ("tv_movie", "TV Movie"),
     ("war", "War & Military"),
     ("western", "Western"),
 )
@@ -69,6 +95,7 @@ RT_TO_CANONICAL_GENRE = {
     "Documentary": "documentation",
     "Drama": "drama",
     "Faith & Spirituality": "faith_spirituality",
+    "Family": "family",
     "Fantasy": "fantasy",
     "Game Show": "reality",
     "History": "history",
@@ -79,41 +106,72 @@ RT_TO_CANONICAL_GENRE = {
     "Music": "music",
     "Musical": "music",
     "Mystery & Thriller": "thriller",
+    "Mystery": "thriller",
     "Nature": "documentation",
     "Romance": "romance",
     "Sci-Fi": "scifi",
+    "Science Fiction": "scifi",
     "Sports": "sport",
     "Stand-Up": "comedy",
+    "Thriller": "thriller",
+    "TV Movie": "tv_movie",
     "War": "war",
     "Western": "western",
 }
 
 
 def canonical_genres(
-    jw_genres: Optional[list[str]], rt_genres: Optional[list[str]]
+    jw_genres: Optional[list[str]],
+    rt_genres: Optional[list[str]],
+    tmdb_genres: Optional[list[str]] = None,
 ) -> tuple[list[str], list[str]]:
-    """Merge raw source genres into ordered canonical keys and labels."""
-    keys = {genre for genre in (jw_genres or []) if genre in GENRE_LABELS}
-    keys.update(
-        mapped
-        for genre in (rt_genres or [])
-        if (mapped := RT_TO_CANONICAL_GENRE.get(genre)) is not None
-    )
+    """Choose TMDb, then RT, then JW genres and normalize the selected list."""
+    keys, labels, _ = preferred_genres(jw_genres, rt_genres, tmdb_genres)
+    return keys, labels
+
+
+def preferred_genres(
+    jw_genres: Optional[list[str]],
+    rt_genres: Optional[list[str]],
+    tmdb_genres: Optional[list[str]] = None,
+) -> tuple[list[str], list[str], Optional[str]]:
+    """Return normalized genres from only the first nonempty source."""
+    if tmdb_genres:
+        source = "tmdb"
+        keys = {
+            mapped for genre in tmdb_genres
+            if (mapped := RT_TO_CANONICAL_GENRE.get(genre)) is not None
+        }
+    elif rt_genres:
+        source = "rt"
+        keys = {
+            mapped for genre in rt_genres
+            if (mapped := RT_TO_CANONICAL_GENRE.get(genre)) is not None
+        }
+    elif jw_genres:
+        source = "justwatch"
+        keys = {genre for genre in jw_genres if genre in GENRE_LABELS}
+    else:
+        return [], [], None
     ordered_keys = [key for key, _ in CANONICAL_GENRES if key in keys]
-    return ordered_keys, [GENRE_LABELS[key] for key in ordered_keys]
+    return ordered_keys, [GENRE_LABELS[key] for key in ordered_keys], source
 
 CATALOG_QUERY = """
-query PopularTitles($first: Int!, $after: String) {
+query PopularTitles(
+  $first: Int!, $after: String, $package: String!,
+  $minYear: Int, $maxYear: Int, $sortBy: PopularTitlesSorting!
+) {
   popularTitles(
     country: US
     first: $first
     after: $after
     filter: {
-      packages: ["ytt"]
+      packages: [$package]
       objectTypes: [MOVIE]
+      releaseYear: { min: $minYear, max: $maxYear }
       includeTitlesWithoutUrl: true
     }
-    sortBy: POPULAR
+    sortBy: $sortBy
     sortRandomSeed: 0
   ) {
     totalCount
@@ -158,6 +216,15 @@ def _session() -> requests.Session:
 _HTTP = _session()
 
 
+def _throttle_jw() -> None:
+    global _last_jw_request_at
+    with _jw_throttle_lock:
+        wait = JW_THROTTLE_SECONDS - (time.time() - _last_jw_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        _last_jw_request_at = time.time()
+
+
 def _ensure_columns(con: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
     existing = {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
     for name, declaration in columns.items():
@@ -189,6 +256,12 @@ def _db() -> sqlite3.Connection:
         "rt_status": "TEXT",
         "rt_attempt_count": "INTEGER NOT NULL DEFAULT 0",
         "rt_last_attempt_at": "TEXT",
+        "tmdb_validated_id": "TEXT",
+        "tmdb_genres": "TEXT",
+        "tmdb_status": "TEXT",
+        "tmdb_attempt_count": "INTEGER NOT NULL DEFAULT 0",
+        "tmdb_last_attempt_at": "TEXT",
+        "tmdb_updated_at": "TEXT",
     })
     con.execute(
         """CREATE TABLE IF NOT EXISTS ratings (
@@ -201,6 +274,53 @@ def _db() -> sqlite3.Connection:
         )"""
     )
     con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS providers (
+            provider_key TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            jw_package TEXT NOT NULL UNIQUE
+        )"""
+    )
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS catalog_providers (
+            jw_id TEXT NOT NULL,
+            provider_key TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            popularity INTEGER,
+            first_seen TEXT,
+            last_seen TEXT,
+            PRIMARY KEY (jw_id, provider_key),
+            FOREIGN KEY (jw_id) REFERENCES catalog(jw_id),
+            FOREIGN KEY (provider_key) REFERENCES providers(provider_key)
+        )"""
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_catalog_providers_active "
+        "ON catalog_providers(provider_key, active, popularity)"
+    )
+    con.executemany(
+        "INSERT INTO providers (provider_key, name, jw_package) VALUES (?, ?, ?) "
+        "ON CONFLICT(provider_key) DO UPDATE SET "
+        "name=excluded.name, jw_package=excluded.jw_package",
+        ((p.key, p.name, p.jw_package) for p in PROVIDERS.values()),
+    )
+
+    # One-time migration: all pre-provider catalog rows came from YouTube TV.
+    migrated = con.execute(
+        "SELECT 1 FROM meta WHERE key = 'provider_schema_migrated'"
+    ).fetchone()
+    if not migrated:
+        con.execute(
+            """INSERT OR IGNORE INTO catalog_providers (
+                jw_id, provider_key, active, popularity, first_seen, last_seen
+            )
+            SELECT jw_id, 'youtube_tv', active, popularity, first_seen, last_seen
+            FROM catalog"""
+        )
+        con.execute(
+            "INSERT INTO meta (key, value) VALUES ('provider_schema_migrated', ?)",
+            (_now(),),
+        )
     con.commit()
     return con
 
@@ -222,10 +342,37 @@ def _set_meta(key: str, value: str) -> None:
         con.close()
 
 
-def _fetch_page(cursor: Optional[str]) -> dict[str, Any]:
+def _provider(provider: str | Provider) -> Provider:
+    if isinstance(provider, Provider):
+        return provider
+    try:
+        return PROVIDERS[provider]
+    except KeyError as exc:
+        raise ValueError(f"Unknown provider: {provider}") from exc
+
+
+def _fetch_page(
+    provider: str | Provider,
+    cursor: Optional[str],
+    min_year: Optional[int] = None,
+    max_year: Optional[int] = None,
+    sort_by: str = "POPULAR",
+) -> dict[str, Any]:
+    config = _provider(provider)
+    _throttle_jw()
     resp = _HTTP.post(
         GRAPHQL_URL,
-        json={"query": CATALOG_QUERY, "variables": {"first": PAGE_SIZE, "after": cursor}},
+        json={
+            "query": CATALOG_QUERY,
+            "variables": {
+                "first": PAGE_SIZE,
+                "after": cursor,
+                "package": config.jw_package,
+                "minYear": min_year,
+                "maxYear": max_year,
+                "sortBy": sort_by,
+            },
+        },
         timeout=(10, 30),
     )
     resp.raise_for_status()
@@ -238,63 +385,108 @@ def _fetch_page(cursor: Optional[str]) -> dict[str, Any]:
     return page
 
 
-def fetch_catalog(max_pages: int = MAX_PAGES) -> int:
-    """Replace the active catalog snapshot after a complete successful fetch."""
+def fetch_catalog(
+    provider: str | Provider = "youtube_tv", max_pages: int = MAX_PAGES
+) -> int:
+    """Replace one provider's active snapshot after a complete successful fetch."""
+    config = _provider(provider)
     con = _db()
-    cursor: Optional[str] = None
     seen_ids: set[str] = set()
     expected_total: Optional[int] = None
-    completed = False
     now = _now()
-    try:
-        for _ in range(max_pages):
-            page = _fetch_page(cursor)
-            if expected_total is None:
-                expected_total = page.get("totalCount")
-            for edge in page.get("edges") or []:
-                node = edge.get("node") or {}
-                jw_id = node.get("id")
-                content = node.get("content") or {}
-                if not jw_id or not content.get("title"):
-                    continue
-                if jw_id in seen_ids:
+
+    def save_edges(
+        edges: list[dict[str, Any]], local_ids: set[str], strict_duplicates: bool
+    ) -> None:
+        for edge in edges:
+            node = edge.get("node") or {}
+            jw_id = node.get("id")
+            content = node.get("content") or {}
+            if not jw_id or not content.get("title"):
+                continue
+            if jw_id in local_ids:
+                if strict_duplicates:
                     raise RuntimeError(f"JustWatch returned duplicate title {jw_id}")
-                seen_ids.add(jw_id)
-                scoring = content.get("scoring") or {}
-                external = content.get("externalIds") or {}
-                genres = [g.get("technicalName") for g in content.get("genres") or []
-                          if g.get("technicalName")]
-                full_path = content.get("fullPath")
-                con.execute(
-                    """INSERT INTO catalog (
-                        jw_id, title, year, popularity, first_seen, last_seen, active,
-                        jw_tomatometer, jw_certified_fresh, jw_synopsis, jw_genres,
-                        jw_poster, jw_url, imdb_id, tmdb_id, imdb_score, tmdb_score,
-                        jw_rating, jw_updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(jw_id) DO UPDATE SET
-                        title=excluded.title, year=excluded.year,
-                        popularity=excluded.popularity, last_seen=excluded.last_seen,
-                        active=1, jw_tomatometer=excluded.jw_tomatometer,
-                        jw_certified_fresh=excluded.jw_certified_fresh,
-                        jw_synopsis=excluded.jw_synopsis, jw_genres=excluded.jw_genres,
-                        jw_poster=excluded.jw_poster, jw_url=excluded.jw_url,
-                        imdb_id=excluded.imdb_id, tmdb_id=excluded.tmdb_id,
-                        imdb_score=excluded.imdb_score, tmdb_score=excluded.tmdb_score,
-                        jw_rating=excluded.jw_rating, jw_updated_at=excluded.jw_updated_at""",
-                    (jw_id, content["title"], content.get("originalReleaseYear"),
-                     len(seen_ids) - 1, now, now, scoring.get("tomatoMeter"),
-                     (1 if scoring.get("certifiedFresh") is True else
-                      0 if scoring.get("certifiedFresh") is False else None),
-                     content.get("shortDescription"), json.dumps(genres),
-                     (f"https://images.justwatch.com{content['posterUrl']}"
-                      if content.get("posterUrl") and not content["posterUrl"].startswith("http")
-                      else content.get("posterUrl")),
-                     f"https://www.justwatch.com{full_path}" if full_path else None,
-                     external.get("imdbId"), external.get("tmdbId"),
-                     scoring.get("imdbScore"), scoring.get("tmdbScore"),
-                     scoring.get("jwRating"), now),
-                )
+                continue
+            local_ids.add(jw_id)
+            if jw_id in seen_ids:
+                continue
+            seen_ids.add(jw_id)
+            scoring = content.get("scoring") or {}
+            external = content.get("externalIds") or {}
+            genres = [
+                g.get("technicalName") for g in content.get("genres") or []
+                if g.get("technicalName")
+            ]
+            full_path = content.get("fullPath")
+            con.execute(
+                """INSERT INTO catalog (
+                    jw_id, title, year, active,
+                    jw_tomatometer, jw_certified_fresh, jw_synopsis, jw_genres,
+                    jw_poster, jw_url, imdb_id, tmdb_id, imdb_score, tmdb_score,
+                    jw_rating, jw_updated_at
+                ) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(jw_id) DO UPDATE SET
+                    title=excluded.title, year=excluded.year,
+                    jw_tomatometer=excluded.jw_tomatometer,
+                    jw_certified_fresh=excluded.jw_certified_fresh,
+                    jw_synopsis=excluded.jw_synopsis, jw_genres=excluded.jw_genres,
+                    jw_poster=excluded.jw_poster, jw_url=excluded.jw_url,
+                    imdb_id=excluded.imdb_id, tmdb_id=excluded.tmdb_id,
+                    imdb_score=excluded.imdb_score, tmdb_score=excluded.tmdb_score,
+                    jw_rating=excluded.jw_rating, jw_updated_at=excluded.jw_updated_at""",
+                (jw_id, content["title"], content.get("originalReleaseYear"),
+                 scoring.get("tomatoMeter"),
+                 (1 if scoring.get("certifiedFresh") is True else
+                  0 if scoring.get("certifiedFresh") is False else None),
+                 content.get("shortDescription"), json.dumps(genres),
+                 (f"https://images.justwatch.com{content['posterUrl']}"
+                  if content.get("posterUrl") and
+                  not content["posterUrl"].startswith("http")
+                  else content.get("posterUrl")),
+                 f"https://www.justwatch.com{full_path}" if full_path else None,
+                 external.get("imdbId"), external.get("tmdbId"),
+                 scoring.get("imdbScore"), scoring.get("tmdbScore"),
+                 scoring.get("jwRating"), now),
+            )
+            con.execute(
+                """INSERT INTO catalog_providers (
+                    jw_id, provider_key, active, popularity, first_seen, last_seen
+                ) VALUES (?, ?, 1, ?, ?, ?)
+                ON CONFLICT(jw_id, provider_key) DO UPDATE SET
+                    active=1, popularity=excluded.popularity,
+                    last_seen=excluded.last_seen""",
+                (jw_id, config.key, len(seen_ids) - 1, now, now),
+            )
+
+    def fetch_window(
+        min_year: Optional[int], max_year: Optional[int], allow_truncated: bool,
+        sort_by: str = "POPULAR", strict_duplicates: bool = True,
+    ) -> tuple[int, int]:
+        cursor: Optional[str] = None
+        local_ids: set[str] = set()
+        window_total: Optional[int] = None
+        completed = False
+        for _ in range(max_pages):
+            page = _fetch_page(config, cursor, min_year, max_year, sort_by)
+            if window_total is None:
+                window_total = int(page.get("totalCount") or 0)
+                if (not allow_truncated and window_total > JW_RESULT_WINDOW_LIMIT
+                        and min_year is not None and max_year is not None
+                        and min_year < max_year):
+                    midpoint = (min_year + max_year) // 2
+                    left_total, left_count = fetch_window(min_year, midpoint, False)
+                    right_total, right_count = fetch_window(midpoint + 1, max_year, False)
+                    if left_total + right_total != window_total:
+                        raise RuntimeError(
+                            "JustWatch release-year partitions changed during retrieval"
+                        )
+                    return window_total, left_count + right_count
+            save_edges(page.get("edges") or [], local_ids, strict_duplicates)
+            if allow_truncated and expected_total is not None \
+                    and len(seen_ids) == expected_total:
+                completed = True
+                break
             page_info = page.get("pageInfo") or {}
             if not page_info.get("hasNextPage"):
                 completed = True
@@ -305,16 +497,77 @@ def fetch_catalog(max_pages: int = MAX_PAGES) -> int:
             cursor = next_cursor
 
         if not completed:
-            raise RuntimeError(f"JustWatch catalog exceeded safety limit of {max_pages} pages")
-        if expected_total is not None and len(seen_ids) != int(expected_total):
+            raise RuntimeError(
+                f"JustWatch catalog exceeded safety limit of {max_pages} pages"
+            )
+        if not allow_truncated and len(local_ids) != window_total:
+            raise RuntimeError(
+                f"Incomplete JustWatch snapshot: expected {window_total}, "
+                f"got {len(local_ids)}"
+            )
+        return window_total or 0, len(local_ids)
+
+    try:
+        expected_total, _ = fetch_window(None, None, True)
+        retrievable_total = expected_total
+        if len(seen_ids) != expected_total:
+            retrievable_total, _ = fetch_window(
+                MIN_RELEASE_YEAR, MAX_RELEASE_YEAR, False
+            )
+        # Release-year partitions cannot select titles whose year is null. The
+        # capped unfiltered window may expose some of them; record any remainder
+        # explicitly instead of weakening validation for year-addressable rows.
+        inaccessible_total = expected_total - len(seen_ids)
+        if len(seen_ids) < retrievable_total or inaccessible_total < 0:
             raise RuntimeError(
                 f"Incomplete JustWatch snapshot: expected {expected_total}, got {len(seen_ids)}"
             )
+        con.execute(
+            "UPDATE catalog_providers SET active = 0 WHERE provider_key = ?",
+            (config.key,),
+        )
+        con.executemany(
+            "UPDATE catalog_providers SET active = 1 "
+            "WHERE provider_key = ? AND jw_id = ?",
+            ((config.key, jw_id) for jw_id in seen_ids),
+        )
+        _set_meta_in(con, f"catalog_total:{config.key}", str(len(seen_ids)))
+        _set_meta_in(con, f"catalog_reported_total:{config.key}", str(expected_total))
+        _set_meta_in(
+            con, f"catalog_inaccessible_total:{config.key}", str(inaccessible_total)
+        )
+        _set_meta_in(con, f"catalog_synced_at:{config.key}", now)
+        # Preserve the legacy meaning of catalog.active for /api/yttv until
+        # that endpoint becomes provider-aware.
         con.execute("UPDATE catalog SET active = 0")
-        con.executemany("UPDATE catalog SET active = 1 WHERE jw_id = ?",
-                        ((jw_id,) for jw_id in seen_ids))
-        _set_meta_in(con, "catalog_total", str(len(seen_ids)))
-        _set_meta_in(con, "catalog_synced_at", now)
+        con.execute(
+            """UPDATE catalog SET active = 1
+               WHERE EXISTS (SELECT 1 FROM catalog_providers cp
+                             WHERE cp.jw_id = catalog.jw_id
+                               AND cp.provider_key = 'youtube_tv'
+                               AND cp.active = 1)"""
+        )
+        if config.key == "youtube_tv":
+            # Keep legacy columns/meta coherent until all consumers migrate.
+            con.execute(
+                """UPDATE catalog SET
+                    popularity = (SELECT cp.popularity FROM catalog_providers cp
+                                  WHERE cp.jw_id = catalog.jw_id
+                                    AND cp.provider_key = 'youtube_tv'),
+                    first_seen = COALESCE(first_seen, (SELECT cp.first_seen
+                                  FROM catalog_providers cp
+                                  WHERE cp.jw_id = catalog.jw_id
+                                    AND cp.provider_key = 'youtube_tv')),
+                    last_seen = (SELECT cp.last_seen FROM catalog_providers cp
+                                 WHERE cp.jw_id = catalog.jw_id
+                                   AND cp.provider_key = 'youtube_tv')
+                  WHERE EXISTS (SELECT 1 FROM catalog_providers cp
+                                WHERE cp.jw_id = catalog.jw_id
+                                  AND cp.provider_key = 'youtube_tv'
+                                  AND cp.active = 1)"""
+            )
+            _set_meta_in(con, "catalog_total", str(len(seen_ids)))
+            _set_meta_in(con, "catalog_synced_at", now)
         con.commit()
         return len(seen_ids)
     except Exception:
@@ -325,7 +578,7 @@ def fetch_catalog(max_pages: int = MAX_PAGES) -> int:
 
 
 def pending_rating_ids(limit: Optional[int] = None) -> list[tuple[str, str, int]]:
-    """Return active titles lacking an RT audience score and eligible for retry."""
+    """Return available titles lacking an RT audience score and eligible for retry."""
     con = _db()
     try:
         retry_before = (datetime.now(timezone.utc) - timedelta(days=RT_RETRY_DAYS)).strftime(
@@ -333,9 +586,12 @@ def pending_rating_ids(limit: Optional[int] = None) -> list[tuple[str, str, int]
         )
         query = """SELECT c.jw_id, c.title, c.year
             FROM catalog c LEFT JOIN ratings r ON r.jw_id = c.jw_id
-            WHERE c.active = 1 AND r.popcornmeter IS NULL
+            WHERE EXISTS (SELECT 1 FROM catalog_providers cp
+                          WHERE cp.jw_id = c.jw_id AND cp.active = 1)
+              AND r.popcornmeter IS NULL
               AND (c.rt_last_attempt_at IS NULL OR c.rt_last_attempt_at <= ?)
-            ORDER BY c.popularity ASC"""
+            ORDER BY (SELECT MIN(cp.popularity) FROM catalog_providers cp
+                      WHERE cp.jw_id = c.jw_id AND cp.active = 1) ASC"""
         params: list[Any] = [retry_before]
         if limit is not None:
             query += " LIMIT ?"
@@ -399,6 +655,79 @@ def enrich(limit: int = 150) -> dict[str, int]:
     finally:
         con.close()
     _set_meta("ratings_synced_at", _now())
+    return stats
+
+
+def pending_tmdb_ids(
+    limit: Optional[int] = None,
+) -> list[tuple[str, str, int, Optional[str], Optional[str]]]:
+    """Return available titles that still need validated TMDb metadata."""
+    con = _db()
+    try:
+        retry_before = (
+            datetime.now(timezone.utc) - timedelta(days=TMDB_RETRY_DAYS)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        query = """SELECT c.jw_id, c.title, c.year, c.imdb_id, c.tmdb_id
+            FROM catalog c
+            WHERE EXISTS (SELECT 1 FROM catalog_providers cp
+                          WHERE cp.jw_id = c.jw_id AND cp.active = 1)
+              AND c.tmdb_genres IS NULL
+              AND (c.tmdb_last_attempt_at IS NULL OR c.tmdb_last_attempt_at <= ?)
+            ORDER BY (SELECT MIN(cp.popularity) FROM catalog_providers cp
+                      WHERE cp.jw_id = c.jw_id AND cp.active = 1) ASC"""
+        params: list[Any] = [retry_before]
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(max(0, int(limit)))
+        return [tuple(row) for row in con.execute(query, params)]
+    finally:
+        con.close()
+
+
+def enrich_tmdb(limit: int = 250) -> dict[str, int]:
+    """Validate TMDb identity and store its genre list for available movies."""
+    stats = {"attempted": 0, "matched": 0, "unmatched": 0, "errors": 0}
+    if not tmdb_module.is_configured():
+        return stats
+
+    con = _db()
+    try:
+        for idx, (jw_id, title, year, imdb_id, raw_tmdb_id) in enumerate(
+            pending_tmdb_ids(limit=limit)
+        ):
+            stats["attempted"] += 1
+            attempted_at = _now()
+            try:
+                result = tmdb_module.lookup(title, year, imdb_id, raw_tmdb_id)
+            except Exception:
+                status, result = "error", None
+                stats["errors"] += 1
+            else:
+                status = "matched" if result else "unmatched"
+                stats["matched" if result else "unmatched"] += 1
+
+            con.execute(
+                "UPDATE catalog SET tmdb_status=?, "
+                "tmdb_attempt_count=tmdb_attempt_count+1, tmdb_last_attempt_at=? "
+                "WHERE jw_id=?",
+                (status, attempted_at, jw_id),
+            )
+            if result:
+                genres = [
+                    genre.get("name") for genre in result.get("genres") or []
+                    if isinstance(genre, dict) and genre.get("name")
+                ]
+                con.execute(
+                    """UPDATE catalog SET tmdb_validated_id=?, tmdb_genres=?,
+                       tmdb_updated_at=? WHERE jw_id=?""",
+                    (str(result["id"]), json.dumps(genres), attempted_at, jw_id),
+                )
+            if (idx + 1) % 100 == 0:
+                con.commit()
+        con.commit()
+    finally:
+        con.close()
+    _set_meta("tmdb_synced_at", _now())
     return stats
 
 

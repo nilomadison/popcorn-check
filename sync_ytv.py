@@ -1,9 +1,10 @@
 """Batch / nightly sync entry point for Popcorn Check.
 
 Modes:
-  (default)   refresh catalog, then up to 150 RT enrichment attempts
-  --catalog   refresh the YouTube TV catalog only
+  (default)   refresh provider catalogs, then up to 150 RT enrichment attempts
+  --catalog   refresh provider catalogs only
   --backfill N  run only N RT enrichment attempts (no catalog refresh)
+  --tmdb-backfill N  run only N TMDb enrichment attempts
   --all       refresh catalog + up to 2000 enrichment attempts
 """
 
@@ -11,7 +12,21 @@ from __future__ import annotations
 
 import argparse
 
+import tmdb
 import ytv
+
+
+def refresh_catalogs() -> dict[str, int]:
+    counts = {}
+    for provider in ytv.PROVIDERS:
+        counts[provider] = ytv.fetch_catalog(provider)
+        print(f"{provider} catalog refreshed: {counts[provider]} titles")
+    return counts
+
+
+def print_tmdb_result(stats: dict[str, int]) -> None:
+    print(f"TMDb enrichment complete: {stats}")
+    print(f"TMDb HTTP 429 responses retried: {tmdb.rate_limit_retry_count()}")
 
 
 def main() -> None:
@@ -24,13 +39,16 @@ def main() -> None:
         help="run only N RT enrichment attempts (no catalog refresh)",
     )
     parser.add_argument(
+        "--tmdb-backfill", type=int, default=None, metavar="N",
+        help="run only N TMDb enrichment attempts (no catalog refresh)",
+    )
+    parser.add_argument(
         "--all", action="store_true", help="catalog refresh + 2000-title backfill"
     )
     args = parser.parse_args()
 
     if args.catalog:
-        n = ytv.fetch_catalog()
-        print(f"catalog refreshed: {n} titles")
+        refresh_catalogs()
         return
 
     if args.backfill is not None:
@@ -38,16 +56,23 @@ def main() -> None:
         print(f"backfill complete: {stats}")
         return
 
+    if args.tmdb_backfill is not None:
+        stats = ytv.enrich_tmdb(limit=args.tmdb_backfill)
+        print_tmdb_result(stats)
+        return
+
     if args.all:
-        n = ytv.fetch_catalog()
-        print(f"catalog refreshed: {n} titles")
+        refresh_catalogs()
+        tmdb_stats = ytv.enrich_tmdb(limit=5000)
+        print_tmdb_result(tmdb_stats)
         stats = ytv.enrich(limit=2000)
         print(f"enrichment complete: {stats}")
         return
 
     # Default nightly: refresh catalog, then attempt up to 150 enrichments.
-    n = ytv.fetch_catalog()
-    print(f"catalog refreshed: {n} titles")
+    refresh_catalogs()
+    tmdb_stats = ytv.enrich_tmdb(limit=250)
+    print_tmdb_result(tmdb_stats)
     stats = ytv.enrich(limit=150)
     print(f"enrichment complete: {stats}")
 

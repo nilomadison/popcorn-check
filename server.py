@@ -1,11 +1,11 @@
-"""Popcorn Check — FastAPI LAN app for Rotten Tomatoes scores + YouTube TV.
+"""Popcorn Check — FastAPI LAN app for Rotten Tomatoes + streaming catalogs.
 
 Routes:
   GET  /             Rotten Tomatoes lookup page
-  GET  /yt           YouTube TV movie browser page
+  GET  /yt           Multi-provider movie browser page
   GET  /api/lookup   ?q=<title> -> RT search candidates
   GET  /api/movie    ?slug=<slug> -> full RT scorecard
-  GET  /api/yttv     ?query=&limit=&offset= -> YTTV catalog + ratings
+  GET  /api/yttv     Active provider catalog + ratings
 
 Both HTML pages are embedded here and are mobile-first for household phone
 use on the LAN. Design system: warm "cinema" dark palette, one amber accent,
@@ -273,6 +273,20 @@ details p { margin: 10px 0 0; color: var(--text-muted); font-size: .95rem; }
 .tile .meta { min-width: 0; flex: 1; }
 .tile h3 { margin: 0 0 2px; font-size: 1.125rem; font-weight: 700; letter-spacing: -.01em; line-height: 1.3; }
 .tile .year { color: var(--text-muted); font-weight: 500; font-size: .9rem; letter-spacing: .01em; }
+.providers { display: flex; flex-wrap: wrap; gap: 6px; }
+.pchip {
+  display: inline-flex; align-items: center; gap: 5px; min-height: 25px;
+  border: 1px solid var(--border-strong); border-radius: 999px;
+  padding: 3px 9px 3px 5px; font-size: .76rem; font-weight: 750;
+  line-height: 1; letter-spacing: .01em; white-space: nowrap;
+  background: var(--surface-2); color: var(--text);
+}
+.pchip .pmark {
+  display: inline-grid; place-items: center; width: 17px; height: 17px;
+  border-radius: 50%; font-size: .68rem; font-weight: 900; line-height: 1;
+}
+.pchip.netflix .pmark { background: #fff; color: #e50914; }
+.pchip.youtube-tv .pmark { background: #ff0033; color: #fff; font-size: .58rem; }
 .tile .genres { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .gchip {
   font-size: .8rem; font-weight: 600; color: var(--text-muted);
@@ -319,7 +333,7 @@ _SHELL = """<!doctype html>
   <div class="brand"><span class="mark">🍿</span><span>Popcorn Check</span></div>
   <nav>
     <a href="/" id="nav-home">RT Lookup</a>
-    <a href="/yt" id="nav-yt">YouTube TV</a>
+    <a href="/yt" id="nav-yt">Movies</a>
   </nav>
 </div></div>
 <div class="wrap" id="app"></div>
@@ -402,10 +416,14 @@ _YT_PAGE_JS = r"""
 navYt.classList.add('active');
 const genreCatalog = __GENRE_CATALOG__;
 const genreLabels = new Map(genreCatalog.map(g => [g.key, g.label]));
+const providerCatalog = {
+  netflix: {label: 'Netflix', className: 'netflix', mark: 'N'},
+  youtube_tv: {label: 'YouTube TV', className: 'youtube-tv', mark: '▶'}
+};
 const NO_GENRE = '__no_genre__';
 app.innerHTML = `
-  <h1>YouTube TV movies</h1>
-  <p class="lede">Every movie on YouTube TV, with Rotten Tomatoes critics and popcorn scores.</p>
+  <h1>Streaming movies</h1>
+  <p class="lede">Movies on Netflix and YouTube TV, with Rotten Tomatoes critics and popcorn scores.</p>
   <input type="search" id="q" placeholder="Filter titles…" autocomplete="off">
   <div class="toolbar">
     <div class="dropdown">
@@ -431,7 +449,7 @@ app.innerHTML = `
   </div>
   <div class="chips" id="chips"></div>
   <div class="resultbar" id="resultbar" aria-live="polite">Loading movies…</div>
-  <div class="grid" id="grid"><p class="empty" role="status">Loading YouTube TV movies…</p></div>
+  <div class="grid" id="grid"><p class="empty" role="status">Loading streaming movies…</p></div>
   <button class="btn ghost" id="more" style="width:100%;margin-top:16px;display:none">Show more</button>`;
 
 const qEl = document.getElementById('q');
@@ -454,7 +472,7 @@ let visible = PAGE;
 
 async function init() {
   resultbar.textContent = 'Loading movies…';
-  grid.innerHTML = '<p class="empty" role="status">Loading YouTube TV movies…</p>';
+  grid.innerHTML = '<p class="empty" role="status">Loading streaming movies…</p>';
   try {
     const r = await fetch('/api/yttv');
     if (!r.ok) throw new Error(`Request failed: ${r.status}`);
@@ -545,6 +563,13 @@ function render() {
 
 function tile(x) {
   const t = pct(x.tomatometer), p = pct(x.popcornmeter);
+  const providerChips = (x.providers || []).map(key => {
+    const provider = providerCatalog[key];
+    if (!provider) return '';
+    return `<span class="pchip ${provider.className}">
+      <span class="pmark" aria-hidden="true">${provider.mark}</span>${esc(provider.label)}
+    </span>`;
+  }).join('');
   const genreChips = (x.genres || []).map(g => `<span class="gchip">${esc(g)}</span>`).join('');
   const smeter = (label, icon, val, cls) => `
     <div class="smeter ${cls}" aria-label="${label}: ${val == null ? 'not rated' : `${val} percent`}">
@@ -566,6 +591,7 @@ function tile(x) {
           </div>
         </div>
       </div>
+      ${providerChips ? `<div class="providers" aria-label="Available on">${providerChips}</div>` : ''}
       ${x.synopsis ? `<details><summary>Movie summary</summary><p>${esc(x.synopsis)}</p></details>` : ''}
     </div>`;
 }
@@ -630,9 +656,9 @@ def api_movie(slug: str = Query(...)) -> JSONResponse:
 
 @app.get("/api/yttv")
 def api_yttv() -> JSONResponse:
-    """Return the full rated catalog (all titles) for client-side filter/sort.
+    """Return the active multi-provider catalog for client-side filter/sort.
 
-    The /yt page loads the active snapshot once and does genre
+    The /yt page loads active provider snapshots once and does genre
     filtering, search, and score sorting in the browser for instant response.
     """
     # Open through the catalog module so additive schema migrations are applied
@@ -644,18 +670,26 @@ def api_yttv() -> JSONResponse:
             "SELECT c.title, c.year, "
             "COALESCE(r.tomatometer, c.jw_tomatometer) AS tomatometer, "
             "r.popcornmeter, r.audience_score_type, "
-            "c.jw_genres, r.genres AS rt_genres, "
-            "COALESCE(r.poster, c.jw_poster) AS poster, "
+            "c.jw_genres, r.genres AS rt_genres, c.tmdb_genres, "
+            "COALESCE(c.jw_poster, r.poster) AS poster, "
             "COALESCE(r.synopsis, c.jw_synopsis) AS synopsis, "
-            "c.popularity "
+            "(SELECT MIN(cp.popularity) FROM catalog_providers cp "
+            " WHERE cp.jw_id = c.jw_id AND cp.active = 1) AS popularity, "
+            "(SELECT GROUP_CONCAT(cp.provider_key) FROM catalog_providers cp "
+            " WHERE cp.jw_id = c.jw_id AND cp.active = 1) AS provider_keys "
             "FROM catalog c "
             "LEFT JOIN ratings r ON r.jw_id = c.jw_id "
-            "WHERE c.active = 1 "
-            "ORDER BY COALESCE(c.popularity, 999999) ASC"
+            "WHERE EXISTS (SELECT 1 FROM catalog_providers cp "
+            "              WHERE cp.jw_id = c.jw_id AND cp.active = 1) "
+            "ORDER BY COALESCE(popularity, 999999) ASC"
         ).fetchall()
         out = []
         for row in rows:
             d = dict(row)
+            d["providers"] = sorted(
+                (d.pop("provider_keys") or "").split(","),
+                key=lambda key: list(ytv_module.PROVIDERS).index(key),
+            )
             def genres_from(column: str) -> list[str]:
                 try:
                     value = json.loads(d.pop(column) or "[]")
@@ -663,8 +697,10 @@ def api_yttv() -> JSONResponse:
                 except (TypeError, ValueError):
                     return []
 
-            d["genre_keys"], d["genres"] = ytv_module.canonical_genres(
-                genres_from("jw_genres"), genres_from("rt_genres")
+            d["genre_keys"], d["genres"], d["genre_source"] = \
+                ytv_module.preferred_genres(
+                genres_from("jw_genres"), genres_from("rt_genres"),
+                genres_from("tmdb_genres")
             )
             out.append(d)
     finally:

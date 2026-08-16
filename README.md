@@ -10,7 +10,7 @@ phone use — large tap targets and expandable "Movie summary" rows.
 |-------------------|----------------------------------------------------------------|
 | `server.py`       | FastAPI app; serves `/` (RT lookup) and `/yt` (YT TV browser)  |
 | `rt.py`           | Rotten Tomatoes search + scorecard parsing + 7-day SQLite cache|
-| `ytv.py`          | JustWatch snapshot fetch + RT audience-score enrichment         |
+| `ytv.py`          | Provider-aware JustWatch snapshots + RT score enrichment        |
 | `sync_ytv.py`     | Batch/nightly sync entry point                                 |
 | `pc.py`           | CLI Rotten Tomatoes lookup                                     |
 | `cache.db`        | RT lookup cache (search + movie scorecards)                    |
@@ -19,29 +19,49 @@ phone use — large tap targets and expandable "Movie summary" rows.
 ## Endpoints
 
 - `GET /` — Rotten Tomatoes lookup UI
-- `GET /yt` — YouTube TV movie browser UI (genre filter + critics/popcorn sort)
+- `GET /yt` — multi-provider movie browser UI (genre filter + score sorting)
 - `GET /api/lookup?q=<title>` — RT search candidates
 - `GET /api/movie?slug=<slug>` — full RT scorecard
-- `GET /api/yttv` — full rated catalog (all titles, one shot; filtering/sorting is client-side)
+- `GET /api/yttv` — active provider catalog (one shot; filtering/sorting is client-side)
 
 ## Sync
 
 ```bash
-.venv/bin/python sync_ytv.py            # catalog refresh + ~150 enrichments
-.venv/bin/python sync_ytv.py --catalog  # catalog only
+.venv/bin/python sync_ytv.py            # provider refresh + ~150 enrichments
+.venv/bin/python sync_ytv.py --catalog  # provider catalogs only
 .venv/bin/python sync_ytv.py --backfill 600   # 600 enrichment attempts
+.venv/bin/python sync_ytv.py --tmdb-backfill 600  # 600 TMDb attempts
 .venv/bin/python sync_ytv.py --all      # catalog + 2000-title backfill
 ```
+
+Copy `.env.example` to `.env` and add your TMDb API read-access token:
+
+```bash
+cp .env.example .env
+```
+
+```dotenv
+TMDB_ACCESS_TOKEN=your_api_read_access_token
+```
+
+The project loads this file automatically. A `TMDB_ACCESS_TOKEN` already set
+in the process environment takes precedence. `.env` is ignored by Git; do not
+commit the token. Without it, catalog and Rotten Tomatoes synchronization
+continue normally and the TMDb enrichment step is skipped.
 
 An example cron entry that runs `sync_ytv.py` nightly at 4:00 AM is provided
 in `examples/popcorn-check.cron.example`. Update its installation path and log
 destination before adding it with `crontab -e`.
 
-The catalog is the general US inventory that JustWatch associates with its
-YouTube TV package; it is not personalized for a subscriber's location,
-add-ons, recordings, or account entitlements. JustWatch supplies baseline
-metadata and critic scores. Rotten Tomatoes is queried for audience scores and
-missing critic data.
+The catalog contains the general US inventories that JustWatch associates with
+its YouTube TV and Netflix packages; it is not personalized for a subscriber's
+location, add-ons, recordings, or account entitlements. Shared movies have one
+catalog/ratings row and one availability row per provider. JustWatch supplies
+baseline metadata and critic scores. Rotten Tomatoes is queried for audience
+scores and missing critic data.
+
+Genres use the first available nonempty source in this order: validated TMDb,
+Rotten Tomatoes, then JustWatch. Genre lists are not merged across sources.
 
 Genre filters use JustWatch's technical genre keys and English display names.
 RT genres are normalized into that vocabulary, supplemented by explicit Anime,
