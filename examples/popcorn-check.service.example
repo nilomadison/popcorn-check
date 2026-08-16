@@ -1,0 +1,17 @@
+[Unit]
+Description=Popcorn Check (Rotten Tomatoes + YouTube TV LAN app)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=popcorn-check
+Group=popcorn-check
+WorkingDirectory=/opt/popcorn-check
+ExecStart=/opt/popcorn-check/.venv/bin/uvicorn server:app --host 0.0.0.0 --port 8790
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,3 @@
+# Refresh the catalog and enrich ratings every day at 4:00 AM.
+# Replace /opt/popcorn-check with the directory where you installed the app.
+0 4 * * * cd /opt/popcorn-check && .venv/bin/python sync_ytv.py >> /var/log/popcorn-check-sync.log 2>&1
