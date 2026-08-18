@@ -303,7 +303,12 @@ details p { margin: 10px 0 0; color: var(--text-muted); font-size: .95rem; }
 }
 
 /* In-card score meters */
-.scores2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+.scores2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 110px), 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
 .smeter {
   border: 1px solid var(--border); border-radius: var(--radius-sm);
   background: var(--surface-2); padding: 7px 8px;
@@ -316,6 +321,13 @@ details p { margin: 10px 0 0; color: var(--text-muted); font-size: .95rem; }
 .smeter.critic .v { color: var(--tomato); }
 .smeter.popcorn { border-top: 2px solid var(--butter); }
 .smeter.popcorn .v { color: var(--butter); }
+.smeter.score-pair { gap: 8px; }
+.score-pair .score { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.score-pair .score + .score { border-left: 1px solid var(--border-strong); padding-left: 8px; }
+.score-pair .popcorn-score .v { color: var(--butter); }
+.smeter.imdb { border-top: 2px solid #f5c518; }
+.smeter.imdb .icon { color: #1a1206; background: #f5c518; border-radius: 3px; padding: 1px 3px; font-size: .65rem; font-weight: 900; }
+.smeter.imdb .v { color: #f5c518; }
 
 .tile details { margin-top: 0; }
 .tile details p { font-size: .98rem; }
@@ -443,7 +455,7 @@ const providerCatalog = {
 const NO_GENRE = '__no_genre__';
 app.innerHTML = `
   <h1>Streaming movies</h1>
-  <p class="lede">Movies on Amazon Prime Video, Netflix, and YouTube TV, with Rotten Tomatoes critics and popcorn scores.</p>
+  <p class="lede">Movies on Amazon Prime Video, Netflix, and YouTube TV.</p>
   <input type="search" id="q" placeholder="Filter titles…" autocomplete="off">
   <div class="toolbar">
     <div class="dropdown">
@@ -459,11 +471,11 @@ app.innerHTML = `
       </div>
     </div>
     <div class="sortgroup">
-      <div class="eyebrow">Sort by</div>
       <div class="seg" id="sort-seg">
         <button data-sort="popular" class="active">Popular</button>
         <button data-sort="critic">Critics</button>
         <button data-sort="popcorn">Popcorn</button>
+        <button data-sort="imdb">IMDb</button>
       </div>
     </div>
   </div>
@@ -563,12 +575,20 @@ function sorted(items) {
   if (sortMode === 'critic') {
     arr.sort((a, b) =>
       ((pct(b.tomatometer) ?? -1) - (pct(a.tomatometer) ?? -1)) ||
-      ((pct(b.popcornmeter) ?? -1) - (pct(a.popcornmeter) ?? -1))
+      ((pct(b.popcornmeter) ?? -1) - (pct(a.popcornmeter) ?? -1)) ||
+      ((pct(b.imdb_score) ?? -1) - (pct(a.imdb_score) ?? -1))
     );
   } else if (sortMode === 'popcorn') {
     arr.sort((a, b) =>
       ((pct(b.popcornmeter) ?? -1) - (pct(a.popcornmeter) ?? -1)) ||
-      ((pct(b.tomatometer) ?? -1) - (pct(a.tomatometer) ?? -1))
+      ((pct(b.tomatometer) ?? -1) - (pct(a.tomatometer) ?? -1)) ||
+      ((pct(b.imdb_score) ?? -1) - (pct(a.imdb_score) ?? -1))
+    );
+  } else if (sortMode === 'imdb') {
+    arr.sort((a, b) =>
+      ((pct(b.imdb_score) ?? -1) - (pct(a.imdb_score) ?? -1)) ||
+      ((pct(b.tomatometer) ?? -1) - (pct(a.tomatometer) ?? -1)) ||
+      ((pct(b.popcornmeter) ?? -1) - (pct(a.popcornmeter) ?? -1))
     );
   } else {
     arr.sort((a, b) => (a.popularity ?? 1e9) - (b.popularity ?? 1e9));
@@ -583,12 +603,12 @@ function render() {
   const shown = items.slice(0, visible);
   grid.innerHTML = shown.length ? shown.map(tile).join('') : '<p class="empty">No titles match.</p>';
   more.style.display = items.length > visible ? '' : 'none';
-  const label = sortMode === 'critic' ? 'critics score' : sortMode === 'popcorn' ? 'popcorn score' : 'popularity';
+  const label = sortMode === 'critic' ? 'critics score' : sortMode === 'popcorn' ? 'popcorn score' : sortMode === 'imdb' ? 'IMDb rating' : 'popularity';
   resultbar.textContent = `Showing ${shown.length.toLocaleString()} of ${items.length.toLocaleString()} · sorted by ${label}`;
 }
 
 function tile(x) {
-  const t = pct(x.tomatometer), p = pct(x.popcornmeter);
+  const t = pct(x.tomatometer), p = pct(x.popcornmeter), imdb = pct(x.imdb_score);
   const providerChips = (x.providers || []).map(key => {
     const provider = providerCatalog[key];
     if (!provider) return '';
@@ -597,10 +617,21 @@ function tile(x) {
     </span>`;
   }).join('');
   const genreChips = (x.genres || []).map(g => `<span class="gchip">${esc(g)}</span>`).join('');
-  const smeter = (label, icon, val, cls) => `
-    <div class="smeter ${cls}" aria-label="${label}: ${val == null ? 'not rated' : `${val} percent`}">
+  const smeter = (label, icon, val, cls, unit = '%') => `
+    <div class="smeter ${cls}" aria-label="${label}: ${val == null ? 'not rated' : unit === '%' ? `${val} percent` : `${val} out of 10`}">
       <span class="icon" aria-hidden="true">${icon}</span>
-      <div class="v">${val == null ? '—' : val}<span class="pct">${val == null ? '' : '%'}</span></div>
+      <div class="v">${val == null ? '—' : val}<span class="pct">${val == null ? '' : unit}</span></div>
+    </div>`;
+  const rtMeter = `
+    <div class="smeter critic score-pair" aria-label="Critics score: ${t == null ? 'not rated' : `${t} percent`}; audience score: ${p == null ? 'not rated' : `${p} percent`}">
+      <div class="score">
+        <span class="icon" aria-hidden="true">🍅</span>
+        <div class="v">${t == null ? '—' : t}<span class="pct">${t == null ? '' : '%'}</span></div>
+      </div>
+      <div class="score popcorn-score">
+        <span class="icon" aria-hidden="true">🍿</span>
+        <div class="v">${p == null ? '—' : p}<span class="pct">${p == null ? '' : '%'}</span></div>
+      </div>
     </div>`;
   return `
     <div class="tile">
@@ -612,8 +643,8 @@ function tile(x) {
           <h3>${esc(x.title)}${x.year ? ` <span class="year">(${esc(x.year)})</span>` : ''}</h3>
           ${genreChips ? `<div class="genres">${genreChips}</div>` : ''}
           <div class="scores2">
-            ${smeter('Critics score', '🍅', t, 'critic')}
-            ${smeter('Audience score', '🍿', p, 'popcorn')}
+            ${rtMeter}
+            ${smeter('IMDb rating', 'IMDb', imdb, 'imdb', '/10')}
           </div>
         </div>
       </div>
@@ -697,7 +728,7 @@ def api_yttv() -> JSONResponse:
             # Prefer the critic score refreshed with each JustWatch snapshot
             # while legacy RT matches are being revalidated.
             "COALESCE(c.jw_tomatometer, r.tomatometer) AS tomatometer, "
-            "r.popcornmeter, r.audience_score_type, "
+            "r.popcornmeter, r.audience_score_type, c.imdb_score, "
             "c.jw_genres, r.genres AS rt_genres, c.tmdb_genres, "
             "COALESCE(c.jw_poster, r.poster) AS poster, "
             "COALESCE(r.synopsis, c.jw_synopsis) AS synopsis, "

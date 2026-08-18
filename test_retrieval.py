@@ -85,7 +85,8 @@ class CatalogSnapshotTests(unittest.TestCase):
     def test_catalog_api_remains_readable_while_sync_has_writer_lock(self) -> None:
         con = ytv._db()
         con.execute(
-            "INSERT INTO catalog (jw_id,title,year) VALUES ('movie','Movie',2000)"
+            "INSERT INTO catalog (jw_id,title,year,imdb_score) "
+            "VALUES ('movie','Movie',2000,8.3)"
         )
         con.execute(
             "INSERT INTO catalog_providers "
@@ -109,6 +110,7 @@ class CatalogSnapshotTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b'"title":"Movie"', response.body)
+        self.assertIn(b'"imdb_score":8.3', response.body)
         self.assertNotIn(b"Uncommitted", response.body)
 
     def test_read_connection_rejects_writes(self) -> None:
