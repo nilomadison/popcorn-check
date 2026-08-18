@@ -8,7 +8,9 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -33,6 +35,8 @@ JW_RESULT_WINDOW_LIMIT = 1900
 MIN_RELEASE_YEAR = 0
 MAX_RELEASE_YEAR = 9999
 RT_RETRY_DAYS = 7
+RT_REFRESH_DAYS = 30
+RT_MATCHER_VERSION = "search-year-v2"
 TMDB_RETRY_DAYS = 30
 JW_THROTTLE_SECONDS = 0.75
 
@@ -42,11 +46,15 @@ class Provider:
     key: str
     name: str
     jw_package: str
+    snapshot_limit: Optional[int] = None
 
 
 PROVIDERS: dict[str, Provider] = {
     "youtube_tv": Provider("youtube_tv", "YouTube TV", PACKAGE_YTT),
     "netflix": Provider("netflix", "Netflix", "nfx"),
+    "amazon_prime": Provider(
+        "amazon_prime", "Amazon Prime Video", "amp", JW_RESULT_WINDOW_LIMIT
+    ),
 }
 
 _last_jw_request_at = 0.0
@@ -233,6 +241,7 @@ def _ensure_columns(con: sqlite3.Connection, table: str, columns: dict[str, str]
 
 
 def _db() -> sqlite3.Connection:
+    """Open a writable connection and apply schema/data migrations."""
     con = sqlite3.connect(YTTV_DB)
     con.execute(
         "CREATE TABLE IF NOT EXISTS catalog ("
@@ -271,6 +280,23 @@ def _db() -> sqlite3.Connection:
             audience_score_type TEXT, critic_avg TEXT, audience_avg TEXT,
             genres TEXT, poster TEXT, rt_url TEXT, updated_at TEXT,
             synopsis TEXT, synopsis_checked_at TEXT
+        )"""
+    )
+    _ensure_columns(con, "ratings", {
+        "audience_sentiment": "TEXT",
+        "audience_certified": "INTEGER",
+        "critic_review_count": "INTEGER",
+        "audience_review_count": "INTEGER",
+        "rt_search_title": "TEXT",
+        "rt_search_year": "INTEGER",
+        "rt_identity_source": "TEXT",
+    })
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS rating_quarantine (
+            jw_id TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            invalidated_at TEXT NOT NULL
         )"""
     )
     con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
@@ -321,7 +347,50 @@ def _db() -> sqlite3.Connection:
             "INSERT INTO meta (key, value) VALUES ('provider_schema_migrated', ?)",
             (_now(),),
         )
+
+    # Ratings created before attempt tracking was introduced are successful
+    # historical attempts, not untouched queue entries. Backfill their state
+    # once so new titles receive their first pass before refresh work begins.
+    rt_state_migrated = con.execute(
+        "SELECT 1 FROM meta WHERE key = 'rt_attempt_state_migrated'"
+    ).fetchone()
+    if not rt_state_migrated:
+        con.execute(
+            """UPDATE catalog SET
+                   rt_status = COALESCE(rt_status, 'matched'),
+                   rt_last_attempt_at = COALESCE(
+                       rt_last_attempt_at,
+                       (SELECT r.updated_at FROM ratings r
+                        WHERE r.jw_id = catalog.jw_id)
+                   )
+               WHERE EXISTS (SELECT 1 FROM ratings r
+                             WHERE r.jw_id = catalog.jw_id)"""
+        )
+        con.execute(
+            "INSERT INTO meta (key, value) VALUES ('rt_attempt_state_migrated', ?)",
+            (_now(),),
+        )
+
+    # Matching-rule changes should reconsider recent misses immediately, but
+    # after untouched titles. An old timestamp places them in the retry tier.
+    matcher_version = con.execute(
+        "SELECT value FROM meta WHERE key = 'rt_matcher_version'"
+    ).fetchone()
+    if not matcher_version or matcher_version[0] != RT_MATCHER_VERSION:
+        con.execute(
+            "UPDATE catalog SET rt_last_attempt_at='2000-01-01 00:00:00' "
+            "WHERE rt_status='unmatched'"
+        )
+        _set_meta_in(con, "rt_matcher_version", RT_MATCHER_VERSION)
     con.commit()
+    return con
+
+
+def _read_db() -> sqlite3.Connection:
+    """Open the existing catalog without acquiring a SQLite writer lock."""
+    uri = f"{Path(YTTV_DB).resolve().as_uri()}?mode=ro"
+    con = sqlite3.connect(uri, uri=True)
+    con.execute("PRAGMA query_only = ON")
     return con
 
 
@@ -396,9 +465,12 @@ def fetch_catalog(
     now = _now()
 
     def save_edges(
-        edges: list[dict[str, Any]], local_ids: set[str], strict_duplicates: bool
+        edges: list[dict[str, Any]], local_ids: set[str], strict_duplicates: bool,
+        result_limit: Optional[int] = None,
     ) -> None:
         for edge in edges:
+            if result_limit is not None and len(local_ids) >= result_limit:
+                break
             node = edge.get("node") or {}
             jw_id = node.get("id")
             content = node.get("content") or {}
@@ -462,6 +534,7 @@ def fetch_catalog(
     def fetch_window(
         min_year: Optional[int], max_year: Optional[int], allow_truncated: bool,
         sort_by: str = "POPULAR", strict_duplicates: bool = True,
+        result_limit: Optional[int] = None,
     ) -> tuple[int, int]:
         cursor: Optional[str] = None
         local_ids: set[str] = set()
@@ -482,7 +555,13 @@ def fetch_catalog(
                             "JustWatch release-year partitions changed during retrieval"
                         )
                     return window_total, left_count + right_count
-            save_edges(page.get("edges") or [], local_ids, strict_duplicates)
+            save_edges(
+                page.get("edges") or [], local_ids, strict_duplicates, result_limit
+            )
+            if result_limit is not None and window_total is not None \
+                    and len(local_ids) == min(window_total, result_limit):
+                completed = True
+                break
             if allow_truncated and expected_total is not None \
                     and len(seen_ids) == expected_total:
                 completed = True
@@ -508,20 +587,33 @@ def fetch_catalog(
         return window_total or 0, len(local_ids)
 
     try:
-        expected_total, _ = fetch_window(None, None, True)
-        retrievable_total = expected_total
-        if len(seen_ids) != expected_total:
-            retrievable_total, _ = fetch_window(
-                MIN_RELEASE_YEAR, MAX_RELEASE_YEAR, False
+        if config.snapshot_limit is not None:
+            expected_total, _ = fetch_window(
+                None, None, True, result_limit=config.snapshot_limit
             )
-        # Release-year partitions cannot select titles whose year is null. The
-        # capped unfiltered window may expose some of them; record any remainder
-        # explicitly instead of weakening validation for year-addressable rows.
-        inaccessible_total = expected_total - len(seen_ids)
-        if len(seen_ids) < retrievable_total or inaccessible_total < 0:
-            raise RuntimeError(
-                f"Incomplete JustWatch snapshot: expected {expected_total}, got {len(seen_ids)}"
-            )
+            snapshot_total = min(expected_total, config.snapshot_limit)
+            if len(seen_ids) != snapshot_total:
+                raise RuntimeError(
+                    f"Incomplete JustWatch snapshot: expected {snapshot_total}, "
+                    f"got {len(seen_ids)}"
+                )
+            inaccessible_total = expected_total - len(seen_ids)
+        else:
+            expected_total, _ = fetch_window(None, None, True)
+            retrievable_total = expected_total
+            if len(seen_ids) != expected_total:
+                retrievable_total, _ = fetch_window(
+                    MIN_RELEASE_YEAR, MAX_RELEASE_YEAR, False
+                )
+            # Release-year partitions cannot select titles whose year is null. The
+            # capped unfiltered window may expose some of them; record any remainder
+            # explicitly instead of weakening validation for year-addressable rows.
+            inaccessible_total = expected_total - len(seen_ids)
+            if len(seen_ids) < retrievable_total or inaccessible_total < 0:
+                raise RuntimeError(
+                    f"Incomplete JustWatch snapshot: expected {expected_total}, "
+                    f"got {len(seen_ids)}"
+                )
         con.execute(
             "UPDATE catalog_providers SET active = 0 WHERE provider_key = ?",
             (config.key,),
@@ -536,6 +628,10 @@ def fetch_catalog(
         _set_meta_in(
             con, f"catalog_inaccessible_total:{config.key}", str(inaccessible_total)
         )
+        if config.snapshot_limit is not None:
+            _set_meta_in(
+                con, f"catalog_snapshot_limit:{config.key}", str(config.snapshot_limit)
+            )
         _set_meta_in(con, f"catalog_synced_at:{config.key}", now)
         # Preserve the legacy meaning of catalog.active for /api/yttv until
         # that endpoint becomes provider-aware.
@@ -578,21 +674,37 @@ def fetch_catalog(
 
 
 def pending_rating_ids(limit: Optional[int] = None) -> list[tuple[str, str, int]]:
-    """Return available titles lacking an RT audience score and eligible for retry."""
+    """Return eligible RT work ordered by its best active-provider popularity."""
     con = _db()
     try:
         retry_before = (datetime.now(timezone.utc) - timedelta(days=RT_RETRY_DAYS)).strftime(
             "%Y-%m-%d %H:%M:%S"
         )
+        refresh_before = (
+            datetime.now(timezone.utc) - timedelta(days=RT_REFRESH_DAYS)
+        ).strftime("%Y-%m-%d %H:%M:%S")
         query = """SELECT c.jw_id, c.title, c.year
             FROM catalog c LEFT JOIN ratings r ON r.jw_id = c.jw_id
             WHERE EXISTS (SELECT 1 FROM catalog_providers cp
                           WHERE cp.jw_id = c.jw_id AND cp.active = 1)
-              AND r.popcornmeter IS NULL
-              AND (c.rt_last_attempt_at IS NULL OR c.rt_last_attempt_at <= ?)
-            ORDER BY (SELECT MIN(cp.popularity) FROM catalog_providers cp
-                      WHERE cp.jw_id = c.jw_id AND cp.active = 1) ASC"""
-        params: list[Any] = [retry_before]
+              AND (
+                    c.rt_last_attempt_at IS NULL
+                    OR (r.popcornmeter IS NULL AND c.rt_last_attempt_at <= ?)
+                    OR (r.popcornmeter IS NOT NULL AND c.rt_last_attempt_at <= ?)
+                  )
+            ORDER BY COALESCE(
+                       (SELECT MIN(cp.popularity)
+                        FROM catalog_providers cp
+                        WHERE cp.jw_id = c.jw_id AND cp.active = 1),
+                       2147483647
+                     ) ASC,
+                     CASE
+                       WHEN c.rt_last_attempt_at IS NULL THEN 0
+                       WHEN r.popcornmeter IS NULL THEN 1
+                       ELSE 2
+                     END,
+                     c.title COLLATE NOCASE ASC"""
+        params: list[Any] = [retry_before, refresh_before]
         if limit is not None:
             query += " LIMIT ?"
             params.append(max(0, int(limit)))
@@ -601,12 +713,101 @@ def pending_rating_ids(limit: Optional[int] = None) -> list[tuple[str, str, int]
         con.close()
 
 
+def _upsert_rating(
+    con: sqlite3.Connection,
+    jw_id: str,
+    catalog_title: str,
+    catalog_year: Optional[int],
+    result: dict[str, Any],
+    attempted_at: str,
+) -> None:
+    synopsis = result.get("synopsis")
+    con.execute(
+        """INSERT INTO ratings (
+            jw_id, title, year, tomatometer, popcornmeter,
+            tomatometer_certified, tomatometer_sentiment,
+            audience_score_type, critic_avg, audience_avg,
+            genres, poster, rt_url, updated_at, synopsis, synopsis_checked_at,
+            audience_sentiment, audience_certified,
+            critic_review_count, audience_review_count,
+            rt_search_title, rt_search_year, rt_identity_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(jw_id) DO UPDATE SET
+            title=excluded.title, year=excluded.year,
+            tomatometer=excluded.tomatometer, popcornmeter=excluded.popcornmeter,
+            tomatometer_certified=excluded.tomatometer_certified,
+            tomatometer_sentiment=excluded.tomatometer_sentiment,
+            audience_score_type=excluded.audience_score_type,
+            critic_avg=excluded.critic_avg, audience_avg=excluded.audience_avg,
+            genres=excluded.genres, poster=excluded.poster,
+            rt_url=excluded.rt_url, updated_at=excluded.updated_at,
+            synopsis=COALESCE(excluded.synopsis, ratings.synopsis),
+            synopsis_checked_at=excluded.synopsis_checked_at,
+            audience_sentiment=excluded.audience_sentiment,
+            audience_certified=excluded.audience_certified,
+            critic_review_count=excluded.critic_review_count,
+            audience_review_count=excluded.audience_review_count,
+            rt_search_title=excluded.rt_search_title,
+            rt_search_year=excluded.rt_search_year,
+            rt_identity_source=excluded.rt_identity_source""",
+        (
+            jw_id, result.get("title") or catalog_title,
+            result.get("year") or catalog_year,
+            result.get("tomatometer"), result.get("popcornmeter"),
+            1 if result.get("tomatometer_certified") else 0,
+            result.get("tomatometer_sentiment"),
+            result.get("audience_score_type"),
+            result.get("critic_average_rating"),
+            result.get("audience_average_rating"),
+            json.dumps(result.get("genres") or []), result.get("poster"),
+            result.get("url"), attempted_at, synopsis, attempted_at,
+            result.get("audience_sentiment"),
+            1 if result.get("audience_certified") else 0,
+            result.get("critic_review_count"),
+            result.get("audience_review_count"),
+            result.get("rt_search_title"), result.get("rt_search_year"),
+            result.get("rt_identity_source"),
+        ),
+    )
+
+
+def _validated_rt_result(
+    result: dict[str, Any],
+    catalog_title: str,
+    catalog_year: Optional[int],
+    search_title: Any = None,
+    search_year: Any = None,
+    identity_source: Any = None,
+) -> Optional[dict[str, Any]]:
+    """Reapply the identity evidence used when an RT match was first stored."""
+    if rt.scorecard_matches(result, catalog_title, catalog_year):
+        validated = dict(result)
+        validated["rt_search_title"] = search_title
+        validated["rt_search_year"] = search_year
+        validated["rt_identity_source"] = "scorecard"
+        return validated
+    if identity_source == "search" and rt.search_identity_matches(
+        result, catalog_title, catalog_year, search_title, search_year
+    ):
+        validated = dict(result)
+        validated["rt_search_title"] = search_title
+        validated["rt_search_year"] = search_year
+        validated["rt_identity_source"] = "search"
+        return validated
+    return None
+
+
 def enrich(limit: int = 150) -> dict[str, int]:
     """Attempt RT enrichment without allowing persistent misses to starve the queue."""
     stats = {"attempted": 0, "matched": 0, "unmatched": 0, "errors": 0}
+    work = pending_rating_ids(limit=limit)
+    total = len(work)
+    started_at = time.monotonic()
+    initial_rate_limit_retries = rt.rate_limit_retry_count()
+    print(f"RT enrichment queued: {total} titles", flush=True)
     con = _db()
     try:
-        for idx, (jw_id, title, year) in enumerate(pending_rating_ids(limit=limit)):
+        for idx, (jw_id, title, year) in enumerate(work):
             stats["attempted"] += 1
             attempted_at = _now()
             try:
@@ -622,39 +823,174 @@ def enrich(limit: int = 150) -> dict[str, int]:
                 "rt_last_attempt_at=? WHERE jw_id=?", (status, attempted_at, jw_id)
             )
             if result:
-                synopsis = result.get("synopsis")
-                con.execute(
-                    """INSERT INTO ratings (
-                        jw_id, title, year, tomatometer, popcornmeter,
-                        tomatometer_certified, tomatometer_sentiment,
-                        audience_score_type, critic_avg, audience_avg,
-                        genres, poster, rt_url, updated_at, synopsis, synopsis_checked_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(jw_id) DO UPDATE SET
-                        title=excluded.title, year=excluded.year,
-                        tomatometer=excluded.tomatometer, popcornmeter=excluded.popcornmeter,
-                        tomatometer_certified=excluded.tomatometer_certified,
-                        tomatometer_sentiment=excluded.tomatometer_sentiment,
-                        audience_score_type=excluded.audience_score_type,
-                        critic_avg=excluded.critic_avg, audience_avg=excluded.audience_avg,
-                        genres=excluded.genres, poster=excluded.poster,
-                        rt_url=excluded.rt_url, updated_at=excluded.updated_at,
-                        synopsis=COALESCE(excluded.synopsis, ratings.synopsis),
-                        synopsis_checked_at=excluded.synopsis_checked_at""",
-                    (jw_id, title, result.get("year") or year,
-                     result.get("tomatometer"), result.get("popcornmeter"),
-                     1 if result.get("tomatometer_certified") else 0,
-                     result.get("tomatometer_sentiment"), result.get("audience_score_type"),
-                     result.get("critic_average_rating"), result.get("audience_average_rating"),
-                     json.dumps(result.get("genres") or []), result.get("poster"),
-                     result.get("url"), attempted_at, synopsis, attempted_at),
-                )
+                _upsert_rating(con, jw_id, title, year, result, attempted_at)
             if (idx + 1) % 50 == 0:
                 con.commit()
+                _print_rt_progress(
+                    stats, total, started_at, initial_rate_limit_retries
+                )
         con.commit()
+        if total and total % 50:
+            _print_rt_progress(stats, total, started_at, initial_rate_limit_retries)
     finally:
         con.close()
     _set_meta("ratings_synced_at", _now())
+    return stats
+
+
+def _print_rt_progress(
+    stats: dict[str, int],
+    total: int,
+    started_at: float,
+    initial_rate_limit_retries: int,
+) -> None:
+    """Print a durable progress checkpoint after committed RT work."""
+    attempted = stats["attempted"]
+    elapsed = max(time.monotonic() - started_at, 0.001)
+    rate = attempted / elapsed * 60
+    percent = attempted / total * 100 if total else 100.0
+    retries = max(0, rt.rate_limit_retry_count() - initial_rate_limit_retries)
+    eta_seconds = (total - attempted) / rate * 60 if rate else 0
+    print(
+        f"RT progress: {attempted}/{total} ({percent:.1f}%) | "
+        f"matched={stats['matched']} unmatched={stats['unmatched']} "
+        f"errors={stats['errors']} | 429 retries={retries} | "
+        f"{rate:.1f} titles/min | elapsed={timedelta(seconds=int(elapsed))} "
+        f"eta={timedelta(seconds=int(eta_seconds))}",
+        flush=True,
+    )
+
+
+def revalidate_ratings(limit: Optional[int] = None) -> dict[str, int]:
+    """Recheck stored RT URLs and quarantine scorecards with wrong identities."""
+    stats = {
+        "checked": 0, "validated": 0, "invalid": 0, "restored": 0, "errors": 0
+    }
+    con = _db()
+    try:
+        con.row_factory = sqlite3.Row
+        query = """SELECT r.*, c.title AS catalog_title, c.year AS catalog_year
+            FROM ratings r JOIN catalog c ON c.jw_id = r.jw_id
+            WHERE EXISTS (SELECT 1 FROM catalog_providers cp
+                          WHERE cp.jw_id = c.jw_id AND cp.active = 1)
+            ORDER BY (SELECT MIN(cp.popularity) FROM catalog_providers cp
+                      WHERE cp.jw_id = c.jw_id AND cp.active = 1) ASC"""
+        params: list[Any] = []
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(max(0, int(limit)))
+        rows = con.execute(query, params).fetchall()
+
+        for idx, row in enumerate(rows):
+            stats["checked"] += 1
+            checked_at = _now()
+            path = urlparse(row["rt_url"] or "").path
+            slug = path.rstrip("/").split("/")[-1]
+            if not slug:
+                stats["errors"] += 1
+                continue
+            try:
+                result = rt.cached_movie(slug) or rt.movie(slug)
+            except Exception:
+                stats["errors"] += 1
+                continue
+            if not result:
+                stats["errors"] += 1
+                continue
+
+            validated_result = _validated_rt_result(
+                result, row["catalog_title"], row["catalog_year"],
+                row["rt_search_title"], row["rt_search_year"],
+                row["rt_identity_source"],
+            )
+            if validated_result:
+                _upsert_rating(
+                    con, row["jw_id"], row["catalog_title"],
+                    row["catalog_year"], validated_result, checked_at
+                )
+                con.execute(
+                    "UPDATE catalog SET rt_status='matched', rt_last_attempt_at=? "
+                    "WHERE jw_id=?",
+                    (checked_at, row["jw_id"]),
+                )
+                con.execute(
+                    "DELETE FROM rating_quarantine WHERE jw_id=?", (row["jw_id"],)
+                )
+                stats["validated"] += 1
+            else:
+                payload = {key: row[key] for key in row.keys()}
+                reason = (
+                    f"catalog identity {row['catalog_title']!r} "
+                    f"({row['catalog_year']}) does not match RT scorecard "
+                    f"{result.get('title')!r} ({result.get('year')})"
+                )
+                con.execute(
+                    """INSERT INTO rating_quarantine (
+                           jw_id, payload, reason, invalidated_at
+                       ) VALUES (?, ?, ?, ?)
+                       ON CONFLICT(jw_id) DO UPDATE SET
+                           payload=excluded.payload, reason=excluded.reason,
+                           invalidated_at=excluded.invalidated_at""",
+                    (row["jw_id"], json.dumps(payload), reason, checked_at),
+                )
+                con.execute("DELETE FROM ratings WHERE jw_id=?", (row["jw_id"],))
+                con.execute(
+                    """UPDATE catalog SET rt_status='invalid',
+                       rt_last_attempt_at=NULL WHERE jw_id=?""",
+                    (row["jw_id"],),
+                )
+                stats["invalid"] += 1
+
+            if (idx + 1) % 50 == 0:
+                con.commit()
+
+        # Reconsider quarantined rows as validation rules improve. This makes
+        # quarantine genuinely recoverable without requiring a DB restore.
+        quarantined = con.execute(
+            """SELECT q.jw_id, q.payload
+               FROM rating_quarantine q JOIN catalog c ON c.jw_id = q.jw_id
+               WHERE EXISTS (SELECT 1 FROM catalog_providers cp
+                             WHERE cp.jw_id = c.jw_id AND cp.active = 1)"""
+        ).fetchall()
+        for row in quarantined:
+            try:
+                payload = json.loads(row["payload"])
+                path = urlparse(payload.get("rt_url") or "").path
+                slug = path.rstrip("/").split("/")[-1]
+                result = rt.cached_movie(slug) if slug else None
+            except (TypeError, ValueError):
+                continue
+            catalog_title = payload.get("catalog_title") or payload.get("title")
+            catalog_year = payload.get("catalog_year") or payload.get("year")
+            validated_result = (
+                _validated_rt_result(
+                    result, catalog_title, catalog_year,
+                    payload.get("rt_search_title"),
+                    payload.get("rt_search_year"),
+                    payload.get("rt_identity_source"),
+                )
+                if result else None
+            )
+            if not validated_result:
+                continue
+            restored_at = _now()
+            _upsert_rating(
+                con, row["jw_id"], catalog_title, catalog_year,
+                validated_result, restored_at,
+            )
+            con.execute(
+                "UPDATE catalog SET rt_status='matched', rt_last_attempt_at=? "
+                "WHERE jw_id=?",
+                (restored_at, row["jw_id"]),
+            )
+            con.execute(
+                "DELETE FROM rating_quarantine WHERE jw_id=?", (row["jw_id"],)
+            )
+            stats["restored"] += 1
+        con.commit()
+    finally:
+        con.close()
+    _set_meta("ratings_revalidated_at", _now())
     return stats
 
 

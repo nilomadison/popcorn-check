@@ -8,7 +8,7 @@ Keys:
   movie:v2:<slug>     -> full scorecard JSON (incl. synopsis)
 
 A 7-day TTL applies to both; requests to Rotten Tomatoes are throttled so we
-don't hammer the site while backfilling the YouTube TV catalog.
+don't hammer the site while backfilling provider catalogs.
 """
 
 from __future__ import annotations
@@ -37,9 +37,10 @@ USER_AGENT = (
 )
 
 # Minimum interval between outbound RT requests (seconds).
-_THROTTLE_SECONDS = 1.2
+_THROTTLE_SECONDS = 0.1
 _last_request_at = 0.0
 _throttle_lock = threading.Lock()
+_rate_limit_retries = 0
 
 
 def _session() -> requests.Session:
@@ -80,7 +81,7 @@ def _db() -> sqlite3.Connection:
     return con
 
 
-def _cache_get(key: str) -> Optional[Any]:
+def _cache_get(key: str, allow_expired: bool = False) -> Optional[Any]:
     con = _db()
     try:
         row = con.execute(
@@ -91,7 +92,7 @@ def _cache_get(key: str) -> Optional[Any]:
     if not row:
         return None
     payload, fetched_at = row
-    if time.time() - fetched_at > CACHE_TTL_SECONDS:
+    if not allow_expired and time.time() - fetched_at > CACHE_TTL_SECONDS:
         return None
     try:
         return json.loads(payload)
@@ -112,10 +113,20 @@ def _cache_set(key: str, value: Any) -> None:
 
 
 def _get(url: str, **kwargs: Any) -> requests.Response:
+    global _rate_limit_retries
     _throttle()
     resp = _HTTP.get(url, timeout=(10, 20), **kwargs)
+    _rate_limit_retries += sum(
+        1 for retry in getattr(resp.raw.retries, "history", ())
+        if retry.status == 429
+    )
     resp.raise_for_status()
     return resp
+
+
+def rate_limit_retry_count() -> int:
+    """Return the number of HTTP 429 responses retried in this process."""
+    return _rate_limit_retries
 
 
 def _to_int(value: Any) -> Optional[int]:
@@ -125,6 +136,41 @@ def _to_int(value: Any) -> Optional[int]:
         return int(str(value).strip())
     except (TypeError, ValueError):
         return None
+
+
+def _normalized(value: Any) -> str:
+    return re.sub(
+        r"[^a-z0-9]+", "", html_mod.unescape(str(value or "")).casefold()
+    )
+
+
+def scorecard_matches(
+    scorecard: Optional[dict[str, Any]], title: str, year: Optional[int]
+) -> bool:
+    """Match exact titles, allowing RT/JW release conventions to differ by one year."""
+    if not scorecard or _normalized(scorecard.get("title")) != _normalized(title):
+        return False
+    if year is None:
+        return True
+    scorecard_year = _to_int(scorecard.get("year"))
+    return scorecard_year is not None and abs(scorecard_year - year) <= 1
+
+
+def search_identity_matches(
+    scorecard: Optional[dict[str, Any]],
+    title: str,
+    year: Optional[int],
+    search_title: Any,
+    search_year: Any,
+) -> bool:
+    """Trust an exact RT search identity when its page omits/misstates year."""
+    return (
+        scorecard is not None
+        and year is not None
+        and _normalized(scorecard.get("title")) == _normalized(title)
+        and _normalized(search_title) == _normalized(title)
+        and _to_int(search_year) == year
+    )
 
 
 def search(query: str) -> list[dict[str, Any]]:
@@ -238,9 +284,17 @@ def movie(slug: str) -> Optional[dict[str, Any]]:
         elif re.search(r"\d+h\s*\d+m", s, re.IGNORECASE):
             runtime = s
 
-    # Tomatometer + audience score rendered as score-icon + rt-text elements,
-    # scoped to the main media-scorecard (the page also embeds many other
-    # movies' score icons in "what to watch" / trailer sections).
+    # The scorecard JSON is the most complete source for scores, averages,
+    # counts, certification and audience type. Visible elements are retained as
+    # fallbacks because RT occasionally rolls out partial markup changes.
+    scorecard = _script_json(text, "media-scorecard-json") or {}
+    critics_data = scorecard.get("criticsScore") or {}
+    audience_data = scorecard.get("audienceScore") or {}
+    if not isinstance(critics_data, dict):
+        critics_data = {}
+    if not isinstance(audience_data, dict):
+        audience_data = {}
+
     card = soup.find("media-scorecard") or soup
     critics_score_el = card.find("rt-text", attrs={"slot": "critics-score"})
     audience_score_el = card.find("rt-text", attrs={"slot": "audience-score"})
@@ -253,18 +307,42 @@ def movie(slug: str) -> Optional[dict[str, Any]]:
         m = re.search(r"(\d+)", el.get_text(strip=True))
         return _to_int(m.group(1)) if m else None
 
-    tomatometer = _pct(critics_score_el)
-    popcornmeter = _pct(audience_score_el)
+    tomatometer = _to_int(critics_data.get("score"))
+    if tomatometer is None:
+        tomatometer = _pct(critics_score_el)
+    popcornmeter = _to_int(audience_data.get("score"))
+    if popcornmeter is None:
+        popcornmeter = _pct(audience_score_el)
 
-    certified = bool(critics_icon and critics_icon.get("certified") == "true")
-    sentiment = (critics_icon.get("sentiment") if critics_icon else "") or ""
-    audience_sentiment = (audience_icon.get("sentiment") if audience_icon else "") or ""
+    certified = critics_data.get("certified") is True or bool(
+        critics_icon and critics_icon.get("certified") == "true"
+    )
+    sentiment = (
+        critics_data.get("sentiment")
+        or (critics_icon.get("sentiment") if critics_icon else "")
+        or ""
+    )
+    audience_sentiment = (
+        audience_data.get("sentiment")
+        or (audience_icon.get("sentiment") if audience_icon else "")
+        or ""
+    )
+    audience_certified = audience_data.get("certified") is True or bool(
+        audience_icon and audience_icon.get("certified") == "true"
+    )
+    critic_count = _to_int(
+        critics_data.get("reviewCount") or critics_data.get("ratingCount")
+    )
+    audience_count = _to_int(
+        audience_data.get("reviewCount") or audience_data.get("ratingCount")
+    )
+    critic_avg = critics_data.get("averageRating")
+    audience_avg = audience_data.get("averageRating")
+    critic_avg = str(critic_avg) if critic_avg not in (None, "") else None
+    audience_avg = str(audience_avg) if audience_avg not in (None, "") else None
+    audience_score_type = audience_data.get("scoreType") or None
 
-    # Critic/audience review counts + averages from JSON-LD structured data.
-    critic_count: Optional[int] = None
-    audience_count: Optional[int] = None
-    critic_avg: Optional[str] = None
-    audience_avg: Optional[str] = None
+    # JSON-LD remains a fallback for counts and percentage scores.
     for ld in soup.find_all("script", attrs={"type": "application/ld+json"}):
         try:
             blob = json.loads(ld.string or "{}")
@@ -283,17 +361,21 @@ def movie(slug: str) -> Optional[dict[str, Any]]:
             if "tomatometer" in name or "critic" in name:
                 if val is not None and tomatometer is None:
                     tomatometer = val
-                critic_count = cnt
+                if critic_count is None:
+                    critic_count = cnt
             elif "audience" in name or "popcorn" in name:
                 if val is not None and popcornmeter is None:
                     popcornmeter = val
-                audience_count = cnt
+                if audience_count is None:
+                    audience_count = cnt
 
     # Where to watch text.
     where_to_watch: Optional[str] = None
     wtw = _script_json(text, "where-to-watch-json")
     if wtw:
-        where_to_watch = wtw.get("whereToWatch") or wtw.get("text")
+        where_to_watch = (
+            wtw.get("affiliatesText") or wtw.get("whereToWatch") or wtw.get("text")
+        )
 
     result: dict[str, Any] = {
         "slug": slug,
@@ -311,8 +393,8 @@ def movie(slug: str) -> Optional[dict[str, Any]]:
         "popcornmeter": popcornmeter,
         "popcornmeter_percent": f"{popcornmeter}%" if popcornmeter is not None else None,
         "audience_sentiment": (audience_sentiment or "").upper(),
-        "audience_certified": False,
-        "audience_score_type": None,
+        "audience_certified": audience_certified,
+        "audience_score_type": audience_score_type,
         "audience_average_rating": audience_avg,
         "audience_review_count": audience_count,
         "where_to_watch": where_to_watch,
@@ -323,19 +405,29 @@ def movie(slug: str) -> Optional[dict[str, Any]]:
     return result
 
 
+def cached_movie(slug: str) -> Optional[dict[str, Any]]:
+    """Return a cached scorecard even if expired, for local identity audits."""
+    slug = slug.strip().strip("/").split("/")[-1]
+    cached = _cache_get(f"movie:v2:{slug}", allow_expired=True)
+    return cached if isinstance(cached, dict) else None
+
+
 def lookup(title: str, year: Optional[int] = None) -> Optional[dict[str, Any]]:
     """Search + disambiguate + return a single best-match scorecard."""
-    def normalized(value: str) -> str:
-        return re.sub(r"[^a-z0-9]+", "", html_mod.unescape(value).casefold())
-
-    needle = normalized(title)
+    needle = _normalized(title)
     def exact_matches(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         exact = [
-            c for c in candidates if normalized(c.get("title") or "") == needle
+            c for c in candidates if _normalized(c.get("title")) == needle
         ]
         if year is None:
             return exact
-        exact_year = [c for c in exact if c.get("year") == year]
+        # RT commonly labels festival and theatrical releases one year apart.
+        # Keep candidate selection consistent with final page validation.
+        exact_year = [
+            c for c in exact
+            if _to_int(c.get("year")) is not None
+            and abs(_to_int(c.get("year")) - year) <= 1
+        ]
         if exact_year:
             return exact_year
         # An explicit conflicting year is unsafe. A yearless candidate is
@@ -358,11 +450,19 @@ def lookup(title: str, year: Optional[int] = None) -> Optional[dict[str, Any]]:
 
     # Search-result metadata and the linked scorecard can disagree. Never let
     # a misleading RT search row attach a different movie's enrichment data.
-    if normalized(result.get("title") or "") != needle:
+    scorecard_identity = scorecard_matches(result, title, year)
+    search_identity = search_identity_matches(
+        result, title, year, best.get("title"), best.get("year")
+    )
+    if not scorecard_identity and not search_identity:
         return None
-    if year is not None and _to_int(result.get("year")) != year:
-        return None
-    return result
+    matched = dict(result)
+    matched["rt_search_title"] = best.get("title")
+    matched["rt_search_year"] = best.get("year")
+    matched["rt_identity_source"] = (
+        "scorecard" if scorecard_identity else "search"
+    )
+    return matched
 
 
 if __name__ == "__main__":

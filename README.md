@@ -1,20 +1,20 @@
 # Popcorn Check
 
 A small Python/FastAPI app for the home LAN that combines Rotten Tomatoes
-scores (and synopses) with YouTube TV movie discovery. Built for household
-phone use — large tap targets and expandable "Movie summary" rows.
+scores (and synopses) with streaming-provider movie discovery. Built for
+household phone use — large tap targets and expandable "Movie summary" rows.
 
 ## Components
 
 | File              | Purpose                                                        |
 |-------------------|----------------------------------------------------------------|
-| `server.py`       | FastAPI app; serves `/` (RT lookup) and `/yt` (YT TV browser)  |
+| `server.py`       | FastAPI app; serves `/` (RT lookup) and `/yt` (provider browser)|
 | `rt.py`           | Rotten Tomatoes search + scorecard parsing + 7-day SQLite cache|
 | `ytv.py`          | Provider-aware JustWatch snapshots + RT score enrichment        |
 | `sync_ytv.py`     | Batch/nightly sync entry point                                 |
 | `pc.py`           | CLI Rotten Tomatoes lookup                                     |
 | `cache.db`        | RT lookup cache (search + movie scorecards)                    |
-| `yttv.db`         | YouTube TV catalog, ratings, meta                              |
+| `yttv.db`         | Streaming-provider catalog, ratings, meta                      |
 
 ## Endpoints
 
@@ -30,6 +30,7 @@ phone use — large tap targets and expandable "Movie summary" rows.
 .venv/bin/python sync_ytv.py            # provider refresh + ~150 enrichments
 .venv/bin/python sync_ytv.py --catalog  # provider catalogs only
 .venv/bin/python sync_ytv.py --backfill 600   # 600 enrichment attempts
+.venv/bin/python sync_ytv.py --revalidate-rt  # quarantine mismatched stored RT pages
 .venv/bin/python sync_ytv.py --tmdb-backfill 600  # 600 TMDb attempts
 .venv/bin/python sync_ytv.py --all      # catalog + 2000-title backfill
 ```
@@ -54,11 +55,24 @@ in `examples/popcorn-check.cron.example`. Update its installation path and log
 destination before adding it with `crontab -e`.
 
 The catalog contains the general US inventories that JustWatch associates with
-its YouTube TV and Netflix packages; it is not personalized for a subscriber's
-location, add-ons, recordings, or account entitlements. Shared movies have one
-catalog/ratings row and one availability row per provider. JustWatch supplies
-baseline metadata and critic scores. Rotten Tomatoes is queried for audience
-scores and missing critic data.
+its YouTube TV, Netflix, and Amazon Prime Video packages; it is not personalized
+for a subscriber's location, add-ons, recordings, or account entitlements. The
+Amazon Prime Video snapshot is intentionally limited to its first 1,900 movies
+by JustWatch popularity because JustWatch caps this unpartitioned result window.
+Shared movies have one catalog/ratings row and one availability row per provider.
+JustWatch supplies baseline metadata and critic scores. Rotten Tomatoes is
+queried for audience scores and missing critic data.
+
+Rotten Tomatoes matching requires an exact normalized title and permits a
+one-year release-date difference in both search results and scorecards for
+festival/theatrical conventions. If an exact-title/exact-year search result
+links to a page whose title agrees but whose year is missing or inconsistent,
+the search identity is retained as validation evidence. Eligible titles are
+enriched in their best active-provider popularity order; misses retry after
+seven days, and
+successful ratings refresh after 30 days. `sync_ytv.py --revalidate-rt` audits
+stored RT URLs against catalog identity. Mismatches are removed from display
+but retained as JSON in the `rating_quarantine` table for recovery.
 
 Genres use the first available nonempty source in this order: validated TMDb,
 Rotten Tomatoes, then JustWatch. Genre lists are not merged across sources.

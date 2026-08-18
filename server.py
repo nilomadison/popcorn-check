@@ -93,15 +93,19 @@ body {
   box-shadow: 0 2px 6px rgba(0,0,0,.4);
 }
 nav { display: flex; gap: 4px; margin-left: auto; }
-nav a {
+nav a, nav button {
   text-decoration: none; color: var(--text-muted);
+  font-family: var(--font);
   font-size: .92rem; font-weight: 600;
   padding: 8px 12px; border-radius: 999px; min-height: 40px;
   display: inline-flex; align-items: center;
+  border: 0; cursor: pointer;
+  background: transparent;
   transition: color .15s, background .15s;
 }
-nav a:hover { color: var(--text); background: var(--surface-2); }
+nav a:hover, nav button:hover { color: var(--text); background: var(--surface-2); }
 nav a.active { color: var(--accent-ink); background: var(--accent); }
+nav button[hidden] { display: none; }
 
 h1 { font-family: var(--font-display); font-size: 1.75rem; font-weight: 600; letter-spacing: -.01em; margin: 22px 0 4px; }
 .lede { color: var(--text-muted); margin: 0 0 20px; font-size: 1.05rem; }
@@ -177,10 +181,12 @@ summary {
 }
 summary::-webkit-details-marker { display: none; }
 summary::before {
-  content: "▸"; color: var(--accent); font-size: .9rem;
-  transition: transform .15s; flex: 0 0 auto;
+  content: "+"; color: var(--accent); font-size: 1.15rem; font-weight: 800;
+  width: 22px; height: 22px; border: 1px solid var(--border-strong);
+  border-radius: 50%; display: grid; place-items: center;
+  line-height: 1; flex: 0 0 auto;
 }
-details[open] summary::before { transform: rotate(90deg); }
+details[open] summary::before { content: "−"; }
 details p { margin: 10px 0 0; color: var(--text-muted); font-size: .95rem; }
 
 /* Explore grid */
@@ -263,9 +269,10 @@ details p { margin: 10px 0 0; color: var(--text-muted); font-size: .95rem; }
 .tile:hover { border-color: var(--border-strong); }
 .tile .top { display: flex; align-items: flex-start; gap: 14px; }
 .tile .poster {
-  width: 32%; height: auto; aspect-ratio: 2 / 3; object-fit: cover; flex: 0 0 auto;
+  width: 40%; height: auto; aspect-ratio: 2 / 3; object-fit: cover; flex: 0 0 auto;
   border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--surface-2);
 }
+@media (min-width: 620px) { .tile .poster { width: 32%; } }
 .poster-placeholder {
   display: grid; place-items: center; padding: 8px; text-align: center;
   color: var(--text-muted); font-size: .85rem; line-height: 1.2;
@@ -287,6 +294,7 @@ details p { margin: 10px 0 0; color: var(--text-muted); font-size: .95rem; }
 }
 .pchip.netflix .pmark { background: #fff; color: #e50914; }
 .pchip.youtube-tv .pmark { background: #ff0033; color: #fff; font-size: .58rem; }
+.pchip.amazon-prime .pmark { background: #00a8e1; color: #fff; }
 .tile .genres { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .gchip {
   font-size: .8rem; font-weight: 600; color: var(--text-muted);
@@ -414,16 +422,28 @@ function renderMovie(m) {
 
 _YT_PAGE_JS = r"""
 navYt.classList.add('active');
+const topNav = document.querySelector('.topbar nav');
+topNav.innerHTML = '<button type="button" id="back-to-top" hidden>↑ Back to top</button>';
+const backToTop = document.getElementById('back-to-top');
+const updateBackToTop = () => { backToTop.hidden = window.scrollY < 240; };
+backToTop.addEventListener('click', () => {
+  const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    ? 'auto' : 'smooth';
+  window.scrollTo({top: 0, behavior});
+});
+window.addEventListener('scroll', updateBackToTop, {passive: true});
+updateBackToTop();
 const genreCatalog = __GENRE_CATALOG__;
 const genreLabels = new Map(genreCatalog.map(g => [g.key, g.label]));
 const providerCatalog = {
   netflix: {label: 'Netflix', className: 'netflix', mark: 'N'},
-  youtube_tv: {label: 'YouTube TV', className: 'youtube-tv', mark: '▶'}
+  youtube_tv: {label: 'YouTube TV', className: 'youtube-tv', mark: '▶'},
+  amazon_prime: {label: 'Prime', className: 'amazon-prime', mark: 'a'}
 };
 const NO_GENRE = '__no_genre__';
 app.innerHTML = `
   <h1>Streaming movies</h1>
-  <p class="lede">Movies on Netflix and YouTube TV, with Rotten Tomatoes critics and popcorn scores.</p>
+  <p class="lede">Movies on Amazon Prime Video, Netflix, and YouTube TV, with Rotten Tomatoes critics and popcorn scores.</p>
   <input type="search" id="q" placeholder="Filter titles…" autocomplete="off">
   <div class="toolbar">
     <div class="dropdown">
@@ -541,9 +561,15 @@ function matches(x) {
 function sorted(items) {
   const arr = items.slice();
   if (sortMode === 'critic') {
-    arr.sort((a, b) => (pct(b.tomatometer) ?? -1) - (pct(a.tomatometer) ?? -1));
+    arr.sort((a, b) =>
+      ((pct(b.tomatometer) ?? -1) - (pct(a.tomatometer) ?? -1)) ||
+      ((pct(b.popcornmeter) ?? -1) - (pct(a.popcornmeter) ?? -1))
+    );
   } else if (sortMode === 'popcorn') {
-    arr.sort((a, b) => (pct(b.popcornmeter) ?? -1) - (pct(a.popcornmeter) ?? -1));
+    arr.sort((a, b) =>
+      ((pct(b.popcornmeter) ?? -1) - (pct(a.popcornmeter) ?? -1)) ||
+      ((pct(b.tomatometer) ?? -1) - (pct(a.tomatometer) ?? -1))
+    );
   } else {
     arr.sort((a, b) => (a.popularity ?? 1e9) - (b.popularity ?? 1e9));
   }
@@ -661,14 +687,16 @@ def api_yttv() -> JSONResponse:
     The /yt page loads active provider snapshots once and does genre
     filtering, search, and score sorting in the browser for instant response.
     """
-    # Open through the catalog module so additive schema migrations are applied
-    # even if the web service restarts before the next scheduled sync.
-    con = ytv_module._db()
+    # This request must remain read-only so it can serve the last committed
+    # snapshot while a catalog or enrichment sync owns SQLite's writer lock.
+    con = ytv_module._read_db()
     try:
         con.row_factory = sqlite3.Row
         rows = con.execute(
             "SELECT c.title, c.year, "
-            "COALESCE(r.tomatometer, c.jw_tomatometer) AS tomatometer, "
+            # Prefer the critic score refreshed with each JustWatch snapshot
+            # while legacy RT matches are being revalidated.
+            "COALESCE(c.jw_tomatometer, r.tomatometer) AS tomatometer, "
             "r.popcornmeter, r.audience_score_type, "
             "c.jw_genres, r.genres AS rt_genres, c.tmdb_genres, "
             "COALESCE(c.jw_poster, r.poster) AS poster, "

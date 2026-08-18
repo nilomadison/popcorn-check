@@ -4,6 +4,7 @@ Modes:
   (default)   refresh provider catalogs, then up to 150 RT enrichment attempts
   --catalog   refresh provider catalogs only
   --backfill N  run only N RT enrichment attempts (no catalog refresh)
+  --revalidate-rt  audit stored RT URLs and quarantine identity mismatches
   --tmdb-backfill N  run only N TMDb enrichment attempts
   --all       refresh catalog + up to 2000 enrichment attempts
 """
@@ -39,6 +40,10 @@ def main() -> None:
         help="run only N RT enrichment attempts (no catalog refresh)",
     )
     parser.add_argument(
+        "--revalidate-rt", action="store_true",
+        help="revalidate active stored RT URLs and quarantine identity mismatches",
+    )
+    parser.add_argument(
         "--tmdb-backfill", type=int, default=None, metavar="N",
         help="run only N TMDb enrichment attempts (no catalog refresh)",
     )
@@ -54,6 +59,11 @@ def main() -> None:
     if args.backfill is not None:
         stats = ytv.enrich(limit=args.backfill)
         print(f"backfill complete: {stats}")
+        return
+
+    if args.revalidate_rt:
+        stats = ytv.revalidate_ratings()
+        print(f"RT revalidation complete: {stats}")
         return
 
     if args.tmdb_backfill is not None:

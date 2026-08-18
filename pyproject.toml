@@ -1,7 +1,7 @@
 [project]
 name = "popcorn-check"
 version = "0.1.0"
-description = "A FastAPI app combining Rotten Tomatoes scores with YouTube TV movie discovery."
+description = "A FastAPI app combining Rotten Tomatoes scores with streaming movie discovery."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
