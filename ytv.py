@@ -637,37 +637,6 @@ def fetch_catalog(
                 con, f"catalog_snapshot_limit:{config.key}", str(config.snapshot_limit)
             )
         _set_meta_in(con, f"catalog_synced_at:{config.key}", now)
-        # Preserve the legacy meaning of catalog.active for /api/yttv until
-        # that endpoint becomes provider-aware.
-        con.execute("UPDATE catalog SET active = 0")
-        con.execute(
-            """UPDATE catalog SET active = 1
-               WHERE EXISTS (SELECT 1 FROM catalog_providers cp
-                             WHERE cp.jw_id = catalog.jw_id
-                               AND cp.provider_key = 'youtube_tv'
-                               AND cp.active = 1)"""
-        )
-        if config.key == "youtube_tv":
-            # Keep legacy columns/meta coherent until all consumers migrate.
-            con.execute(
-                """UPDATE catalog SET
-                    popularity = (SELECT cp.popularity FROM catalog_providers cp
-                                  WHERE cp.jw_id = catalog.jw_id
-                                    AND cp.provider_key = 'youtube_tv'),
-                    first_seen = COALESCE(first_seen, (SELECT cp.first_seen
-                                  FROM catalog_providers cp
-                                  WHERE cp.jw_id = catalog.jw_id
-                                    AND cp.provider_key = 'youtube_tv')),
-                    last_seen = (SELECT cp.last_seen FROM catalog_providers cp
-                                 WHERE cp.jw_id = catalog.jw_id
-                                   AND cp.provider_key = 'youtube_tv')
-                  WHERE EXISTS (SELECT 1 FROM catalog_providers cp
-                                WHERE cp.jw_id = catalog.jw_id
-                                  AND cp.provider_key = 'youtube_tv'
-                                  AND cp.active = 1)"""
-            )
-            _set_meta_in(con, "catalog_total", str(len(seen_ids)))
-            _set_meta_in(con, "catalog_synced_at", now)
         con.commit()
         return len(seen_ids)
     except Exception:
@@ -1074,8 +1043,11 @@ def enrich_tmdb(limit: int = 250) -> dict[str, int]:
 def catalog_count(active_only: bool = False) -> int:
     con = _db()
     try:
-        where = " WHERE active = 1" if active_only else ""
-        return con.execute(f"SELECT COUNT(*) FROM catalog{where}").fetchone()[0]
+        if active_only:
+            return con.execute(
+                "SELECT COUNT(DISTINCT jw_id) FROM catalog_providers WHERE active = 1"
+            ).fetchone()[0]
+        return con.execute("SELECT COUNT(*) FROM catalog").fetchone()[0]
     finally:
         con.close()
 

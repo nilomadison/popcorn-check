@@ -66,7 +66,6 @@ class CatalogSnapshotTests(unittest.TestCase):
         with patch.object(ytv, "_fetch_page", return_value=page):
             self.assertEqual(ytv.fetch_catalog(), 1)
         con = sqlite3.connect(self.db)
-        self.assertEqual(con.execute("SELECT active FROM catalog WHERE jw_id='old'").fetchone()[0], 0)
         self.assertEqual(
             con.execute(
                 "SELECT active FROM catalog_providers "
@@ -75,12 +74,12 @@ class CatalogSnapshotTests(unittest.TestCase):
             0,
         )
         saved = con.execute(
-            "SELECT active,jw_tomatometer,jw_synopsis,jw_genres,jw_poster "
+            "SELECT jw_tomatometer,jw_synopsis,jw_genres,jw_poster "
             "FROM catalog WHERE jw_id='1'"
         ).fetchone()
         con.close()
-        self.assertEqual(saved[:4], (1, 81, "About New", '["drama"]'))
-        self.assertTrue(saved[4].startswith("https://images.justwatch.com/"))
+        self.assertEqual(saved[:3], (81, "About New", '["drama"]'))
+        self.assertTrue(saved[3].startswith("https://images.justwatch.com/"))
 
     def test_catalog_api_remains_readable_while_sync_has_writer_lock(self) -> None:
         con = ytv._db()
@@ -238,12 +237,8 @@ class CatalogSnapshotTests(unittest.TestCase):
             "SELECT provider_key,active FROM catalog_providers "
             "WHERE jw_id='shared' ORDER BY provider_key"
         ).fetchall()
-        legacy_active = con.execute(
-            "SELECT active FROM catalog WHERE jw_id='netflix-new'"
-        ).fetchone()[0]
         con.close()
         self.assertEqual(statuses, [("netflix", 0), ("youtube_tv", 1)])
-        self.assertEqual(legacy_active, 0)
 
     def test_limited_provider_stops_at_snapshot_limit(self) -> None:
         provider = ytv.Provider("limited", "Limited", "lim", snapshot_limit=3)
