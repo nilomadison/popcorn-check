@@ -77,10 +77,11 @@ but retained as JSON in the `rating_quarantine` table for recovery.
 Genres use the first available nonempty source in this order: validated TMDb,
 Rotten Tomatoes, then JustWatch. Genre lists are not merged across sources.
 
-Genre filters use JustWatch's technical genre keys and English display names.
-RT genres are normalized into that vocabulary, supplemented by explicit Anime,
-Biography, Faith & Spirituality, Holiday, and LGBTQ+ categories. Movies without
-genre data from either source appear under `No genre listed`.
+Genre filters use TMDb's official movie genre list (19 fixed genres). RT and
+JustWatch genres are normalized into that vocabulary; source genres with no
+TMDb equivalent (e.g. RT's Anime, Biography, Faith & Spirituality, Holiday,
+LGBTQ+; JustWatch's european, reality, sport) are dropped. Movies without
+genre data from any source appear under `No genre listed`.
 
 ## Run
 

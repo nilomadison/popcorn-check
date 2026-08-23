@@ -108,7 +108,6 @@ nav a.active { color: var(--accent-ink); background: var(--accent); }
 nav button[hidden] { display: none; }
 
 h1 { font-family: var(--font-display); font-size: 1.75rem; font-weight: 600; letter-spacing: -.01em; margin: 22px 0 4px; }
-.lede { color: var(--text-muted); margin: 0 0 20px; font-size: 1.05rem; }
 
 /* Controls */
 input[type="search"] {
@@ -241,20 +240,6 @@ details p { margin: 10px 0 0; color: var(--text-muted); font-size: .95rem; }
 }
 .seg button:hover { color: var(--text); }
 .seg button.active { background: var(--accent); color: var(--accent-ink); }
-
-/* Selected genre chips */
-.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-.chips:empty { display: none; }
-.chip {
-  display: inline-flex; align-items: center; gap: 6px;
-  background: var(--surface-2); border: 1px solid var(--border-strong);
-  border-radius: 999px; padding: 4px 8px 4px 12px; font-size: .92rem; font-weight: 600;
-}
-.chip button {
-  border: 0; background: transparent; color: var(--text-faint); cursor: pointer;
-  font-size: 1rem; line-height: 1; padding: 2px 5px; border-radius: 999px;
-}
-.chip button:hover { color: var(--text); background: var(--border); }
 
 /* Results bar */
 .resultbar { display: flex; align-items: center; justify-content: space-between; color: var(--text-muted); font-size: .92rem; margin: 12px 0 10px; }
@@ -446,7 +431,6 @@ backToTop.addEventListener('click', () => {
 window.addEventListener('scroll', updateBackToTop, {passive: true});
 updateBackToTop();
 const genreCatalog = __GENRE_CATALOG__;
-const genreLabels = new Map(genreCatalog.map(g => [g.key, g.label]));
 const providerCatalog = {
   netflix: {label: 'Netflix', className: 'netflix', mark: 'N'},
   youtube_tv: {label: 'YouTube TV', className: 'youtube-tv', mark: '▶'},
@@ -454,8 +438,6 @@ const providerCatalog = {
 };
 const NO_GENRE = '__no_genre__';
 app.innerHTML = `
-  <h1>Streaming movies</h1>
-  <p class="lede">Movies on Amazon Prime Video, Netflix, and YouTube TV.</p>
   <input type="search" id="q" placeholder="Filter titles…" autocomplete="off">
   <div class="toolbar">
     <div class="dropdown">
@@ -479,7 +461,6 @@ app.innerHTML = `
       </div>
     </div>
   </div>
-  <div class="chips" id="chips"></div>
   <div class="resultbar" id="resultbar" aria-live="polite">Loading movies…</div>
   <div class="grid" id="grid"><p class="empty" role="status">Loading streaming movies…</p></div>
   <button class="btn ghost" id="more" style="width:100%;margin-top:16px;display:none">Show more</button>`;
@@ -489,16 +470,35 @@ const genreToggle = document.getElementById('genre-toggle');
 const genrePanel = document.getElementById('genre-panel');
 const genreListEl = document.getElementById('genre-list');
 const genreCountEl = document.getElementById('genre-count');
-const chipsEl = document.getElementById('chips');
 const sortSeg = document.getElementById('sort-seg');
 const grid = document.getElementById('grid');
 const resultbar = document.getElementById('resultbar');
 const more = document.getElementById('more');
 const PAGE = 200;
 
+const GENRE_STORAGE_KEY = 'yttv.selectedGenres';
+
+function loadSelectedGenres() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(GENRE_STORAGE_KEY) || '[]');
+    const valid = new Set([...genreCatalog.map(g => g.key), NO_GENRE]);
+    return new Set(saved.filter(key => valid.has(key)));
+  } catch (error) {
+    return new Set();
+  }
+}
+
+function saveSelectedGenres() {
+  try {
+    localStorage.setItem(GENRE_STORAGE_KEY, JSON.stringify([...selected]));
+  } catch (error) {
+    // Ignore storage failures (private browsing, quota, disabled storage).
+  }
+}
+
 let all = [];
 let genres = [];          // [{key, label, count}], canonical order
-let selected = new Set();
+let selected = loadSelectedGenres();
 let sortMode = 'popular';
 let visible = PAGE;
 
@@ -519,6 +519,7 @@ async function init() {
     genres = genreCatalog.map(g => ({...g, count: counts.get(g.key) || 0}));
     genres.push({key: NO_GENRE, label: 'No genre listed', count: noGenreCount});
     renderGenreList();
+    updateGenreUI();
     render();
   } catch (error) {
     resultbar.textContent = '';
@@ -537,6 +538,7 @@ function renderGenreList() {
   genreListEl.querySelectorAll('input[type=checkbox]').forEach(cb => {
     cb.addEventListener('change', () => {
       if (cb.checked) selected.add(cb.value); else selected.delete(cb.value);
+      saveSelectedGenres();
       updateGenreUI();
       refresh();
     });
@@ -545,20 +547,7 @@ function renderGenreList() {
 
 function updateGenreUI() {
   const n = selected.size;
-  genreCountEl.textContent = n ? String(n) : 'All';
-  chipsEl.innerHTML = [...selected].map(key => {
-    const label = key === NO_GENRE ? 'No genre listed' : (genreLabels.get(key) || key);
-    return `<span class="chip">${esc(label)}<button data-g="${esc(key)}" aria-label="Remove ${esc(label)}">×</button></span>`;
-  }
-  ).join('');
-  chipsEl.querySelectorAll('button').forEach(b => {
-    b.addEventListener('click', () => {
-      selected.delete(b.dataset.g);
-      updateGenreUI();
-      renderGenreList();
-      refresh();
-    });
-  });
+  genreCountEl.textContent = n ? `${n} selected` : 'All';
 }
 
 function matches(x) {
@@ -656,7 +645,7 @@ function tile(x) {
 qEl.addEventListener('input', refresh);
 genreToggle.addEventListener('click', () => { genrePanel.hidden = !genrePanel.hidden; });
 document.getElementById('genre-clear').addEventListener('click', () => {
-  selected.clear(); updateGenreUI(); renderGenreList(); refresh();
+  selected.clear(); saveSelectedGenres(); updateGenreUI(); renderGenreList(); refresh();
 });
 document.getElementById('genre-done').addEventListener('click', () => { genrePanel.hidden = true; });
 document.addEventListener('click', e => {

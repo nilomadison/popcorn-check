@@ -462,15 +462,15 @@ class GenreNormalizationTests(unittest.TestCase):
             ["documentation", "drama"], ["Action"], ["Thriller", "Horror"]
         )
         self.assertEqual(keys, ["horror", "thriller"])
-        self.assertEqual(labels, ["Horror", "Mystery & Thriller"])
+        self.assertEqual(labels, ["Horror", "Thriller"])
         self.assertEqual(source, "tmdb")
 
     def test_rt_genres_take_precedence_over_justwatch(self) -> None:
         keys, labels, source = ytv.preferred_genres(
             ["documentation", "drama"], ["Action", "Sci-Fi"], []
         )
-        self.assertEqual(keys, ["action", "scifi"])
-        self.assertEqual(labels, ["Action & Adventure", "Science-Fiction"])
+        self.assertEqual(keys, ["action", "science_fiction"])
+        self.assertEqual(labels, ["Action", "Science Fiction"])
         self.assertEqual(source, "rt")
 
     def test_justwatch_genres_are_the_final_fallback(self) -> None:
@@ -479,12 +479,12 @@ class GenreNormalizationTests(unittest.TestCase):
         self.assertEqual(labels, ["Drama", "Horror"])
         self.assertEqual(source, "justwatch")
 
-    def test_custom_rt_categories_remain_distinct(self) -> None:
+    def test_rt_categories_with_no_tmdb_equivalent_are_dropped(self) -> None:
         keys, labels = ytv.canonical_genres(
             [], ["Faith & Spirituality", "Holiday", "LGBTQ+"]
         )
-        self.assertEqual(keys, ["faith_spirituality", "holiday", "lgbtq"])
-        self.assertEqual(labels, ["Faith & Spirituality", "Holiday", "LGBTQ+"])
+        self.assertEqual(keys, [])
+        self.assertEqual(labels, [])
 
     def test_unmapped_rt_values_do_not_create_filter_categories(self) -> None:
         self.assertEqual(
@@ -493,7 +493,7 @@ class GenreNormalizationTests(unittest.TestCase):
         )
 
     def test_every_mapping_targets_a_declared_genre(self) -> None:
-        self.assertLessEqual(set(ytv.RT_TO_CANONICAL_GENRE.values()),
+        self.assertLessEqual(set(ytv.GENRE_ALIASES.values()),
                              set(ytv.GENRE_LABELS))
 
 

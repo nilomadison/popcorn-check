@@ -60,71 +60,80 @@ PROVIDERS: dict[str, Provider] = {
 _last_jw_request_at = 0.0
 _jw_throttle_lock = threading.Lock()
 
-# JustWatch's US-English genre vocabulary plus the five RT-only categories we
-# intentionally expose. Keys are stable API/filter values; labels are display
-# text. Keep this ordered alphabetically by label.
+# TMDb's official movie genre list (the fixed set returned by TMDb's
+# /genre/movie/list endpoint). Keys are stable API/filter values; labels
+# are TMDb's own display text. Keep this ordered alphabetically by label.
 CANONICAL_GENRES: tuple[tuple[str, str], ...] = (
-    ("action", "Action & Adventure"),
+    ("action", "Action"),
+    ("adventure", "Adventure"),
     ("animation", "Animation"),
-    ("anime", "Anime"),
-    ("biography", "Biography"),
     ("comedy", "Comedy"),
     ("crime", "Crime"),
-    ("documentation", "Documentary"),
+    ("documentary", "Documentary"),
     ("drama", "Drama"),
-    ("faith_spirituality", "Faith & Spirituality"),
+    ("family", "Family"),
     ("fantasy", "Fantasy"),
     ("history", "History"),
-    ("holiday", "Holiday"),
     ("horror", "Horror"),
-    ("family", "Kids & Family"),
-    ("lgbtq", "LGBTQ+"),
-    ("european", "Made in Europe"),
-    ("music", "Music & Musical"),
-    ("thriller", "Mystery & Thriller"),
-    ("reality", "Reality TV"),
+    ("music", "Music"),
+    ("mystery", "Mystery"),
     ("romance", "Romance"),
-    ("scifi", "Science-Fiction"),
-    ("sport", "Sport"),
+    ("science_fiction", "Science Fiction"),
+    ("thriller", "Thriller"),
     ("tv_movie", "TV Movie"),
-    ("war", "War & Military"),
+    ("war", "War"),
     ("western", "Western"),
 )
 GENRE_LABELS = dict(CANONICAL_GENRES)
 
-RT_TO_CANONICAL_GENRE = {
+# Normalizes genre strings from any source (TMDb, RT, JustWatch) onto the
+# TMDb vocabulary above. TMDb's own names are listed for completeness since
+# every source is funneled through this single table. RT and JustWatch
+# genres with no TMDb equivalent (RT: Anime, Biography, Faith &
+# Spirituality, Game Show, Holiday, LGBTQ+, Sports; JustWatch: european,
+# reality, sport) are intentionally left unmapped and dropped.
+GENRE_ALIASES = {
     "Action": "action",
-    "Adventure": "action",
+    "Adventure": "adventure",
     "Animation": "animation",
-    "Anime": "anime",
-    "Biography": "biography",
     "Comedy": "comedy",
     "Crime": "crime",
-    "Documentary": "documentation",
+    "Documentary": "documentary",
     "Drama": "drama",
-    "Faith & Spirituality": "faith_spirituality",
     "Family": "family",
     "Fantasy": "fantasy",
-    "Game Show": "reality",
     "History": "history",
-    "Holiday": "holiday",
     "Horror": "horror",
-    "Kids & Family": "family",
-    "LGBTQ+": "lgbtq",
     "Music": "music",
-    "Musical": "music",
-    "Mystery & Thriller": "thriller",
-    "Mystery": "thriller",
-    "Nature": "documentation",
+    "Mystery": "mystery",
     "Romance": "romance",
-    "Sci-Fi": "scifi",
-    "Science Fiction": "scifi",
-    "Sports": "sport",
-    "Stand-Up": "comedy",
+    "Science Fiction": "science_fiction",
     "Thriller": "thriller",
     "TV Movie": "tv_movie",
     "War": "war",
     "Western": "western",
+    "Kids & Family": "family",
+    "Musical": "music",
+    "Mystery & Thriller": "thriller",
+    "Nature": "documentary",
+    "Sci-Fi": "science_fiction",
+    "Stand-Up": "comedy",
+    "action": "action",
+    "animation": "animation",
+    "comedy": "comedy",
+    "crime": "crime",
+    "documentation": "documentary",
+    "drama": "drama",
+    "family": "family",
+    "fantasy": "fantasy",
+    "history": "history",
+    "horror": "horror",
+    "music": "music",
+    "romance": "romance",
+    "scifi": "science_fiction",
+    "thriller": "thriller",
+    "war": "war",
+    "western": "western",
 }
 
 
@@ -145,22 +154,17 @@ def preferred_genres(
 ) -> tuple[list[str], list[str], Optional[str]]:
     """Return normalized genres from only the first nonempty source."""
     if tmdb_genres:
-        source = "tmdb"
-        keys = {
-            mapped for genre in tmdb_genres
-            if (mapped := RT_TO_CANONICAL_GENRE.get(genre)) is not None
-        }
+        source, raw = "tmdb", tmdb_genres
     elif rt_genres:
-        source = "rt"
-        keys = {
-            mapped for genre in rt_genres
-            if (mapped := RT_TO_CANONICAL_GENRE.get(genre)) is not None
-        }
+        source, raw = "rt", rt_genres
     elif jw_genres:
-        source = "justwatch"
-        keys = {genre for genre in jw_genres if genre in GENRE_LABELS}
+        source, raw = "justwatch", jw_genres
     else:
         return [], [], None
+    keys = {
+        mapped for genre in raw
+        if (mapped := GENRE_ALIASES.get(genre)) is not None
+    }
     ordered_keys = [key for key, _ in CANONICAL_GENRES if key in keys]
     return ordered_keys, [GENRE_LABELS[key] for key in ordered_keys], source
 
