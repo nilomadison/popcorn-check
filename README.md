@@ -50,9 +50,29 @@ in the process environment takes precedence. `.env` is ignored by Git; do not
 commit the token. Without it, catalog and Rotten Tomatoes synchronization
 continue normally and the TMDb enrichment step is skipped.
 
-An example cron entry that runs `sync_ytv.py` nightly at 4:00 AM is provided
-in `examples/popcorn-check.cron.example`. Update its installation path and log
-destination before adding it with `crontab -e`.
+Schedule `sync_ytv.py` to run nightly with either a systemd timer or cron.
+
+**systemd timer** (pairs naturally with running the app itself as a systemd
+service, below):
+
+```bash
+cp examples/popcorn-check-sync.service.example /tmp/popcorn-check-sync.service
+cp examples/popcorn-check-sync.timer.example /tmp/popcorn-check-sync.timer
+# Edit both for your user and installation path.
+sudo cp /tmp/popcorn-check-sync.service /etc/systemd/system/popcorn-check-sync.service
+sudo cp /tmp/popcorn-check-sync.timer /etc/systemd/system/popcorn-check-sync.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now popcorn-check-sync.timer
+```
+
+`Persistent=true` means a run missed while the machine was off catches up at
+the next boot instead of silently waiting for the next scheduled time. Check
+on it with `systemctl list-timers popcorn-check-sync.timer` and
+`journalctl -u popcorn-check-sync.service`.
+
+**cron** (alternative): an example entry that runs `sync_ytv.py` nightly at
+4:00 AM is provided in `examples/popcorn-check.cron.example`. Update its
+installation path and log destination before adding it with `crontab -e`.
 
 The catalog contains the general US inventories that JustWatch associates with
 its YouTube TV, Netflix, and Amazon Prime Video packages; it is not personalized

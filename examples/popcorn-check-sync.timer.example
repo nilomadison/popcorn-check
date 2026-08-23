@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Popcorn Check catalog and ratings sync daily
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+Unit=popcorn-check-sync.service
+
+[Install]
+WantedBy=timers.target

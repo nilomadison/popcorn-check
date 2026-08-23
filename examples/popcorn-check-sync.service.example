@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Popcorn Check catalog and ratings sync
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=popcorn-check
+Group=popcorn-check
+WorkingDirectory=/opt/popcorn-check
+ExecStart=/opt/popcorn-check/.venv/bin/python sync_ytv.py
