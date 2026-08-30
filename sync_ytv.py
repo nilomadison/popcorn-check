@@ -1,7 +1,7 @@
 """Batch / nightly sync entry point for Popcorn Check.
 
 Modes:
-  (default)   refresh provider catalogs, then up to 150 RT enrichment attempts
+  (default)   refresh provider catalogs, then up to 500 RT enrichment attempts
   --catalog   refresh provider catalogs only
   --backfill N  run only N RT enrichment attempts (no catalog refresh)
   --revalidate-rt  audit stored RT URLs and quarantine identity mismatches
@@ -79,11 +79,11 @@ def main() -> None:
         print(f"enrichment complete: {stats}")
         return
 
-    # Default nightly: refresh catalog, then attempt up to 150 enrichments.
+    # Default nightly: refresh catalog, then attempt up to 500 enrichments.
     refresh_catalogs()
     tmdb_stats = ytv.enrich_tmdb(limit=250)
     print_tmdb_result(tmdb_stats)
-    stats = ytv.enrich(limit=150)
+    stats = ytv.enrich(limit=500)
     print(f"enrichment complete: {stats}")
 
 

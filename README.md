@@ -27,7 +27,7 @@ household phone use — large tap targets and expandable "Movie summary" rows.
 ## Sync
 
 ```bash
-.venv/bin/python sync_ytv.py            # provider refresh + ~150 enrichments
+.venv/bin/python sync_ytv.py            # provider refresh + ~500 enrichments
 .venv/bin/python sync_ytv.py --catalog  # provider catalogs only
 .venv/bin/python sync_ytv.py --backfill 600   # 600 enrichment attempts
 .venv/bin/python sync_ytv.py --revalidate-rt  # quarantine mismatched stored RT pages
