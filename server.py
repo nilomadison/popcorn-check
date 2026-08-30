@@ -16,14 +16,19 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from pathlib import Path
 
 from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 import rt
 import ytv as ytv_module
 
 app = FastAPI(title="Popcorn Check")
+
+_STATIC = Path(__file__).resolve().parent / "static"
+app.mount("/static", StaticFiles(directory=_STATIC), name="static")
 
 # ---------------------------------------------------------------------------
 # Shared design shell
@@ -86,11 +91,11 @@ body {
   font-weight: 600; font-size: 1.1rem; letter-spacing: -.01em;
   white-space: nowrap;
 }
+/* Same artwork as the home screen icon, minus its tile (static/mark.svg). */
 .brand .mark {
-  width: 26px; height: 26px; border-radius: 8px;
-  background: linear-gradient(135deg, var(--tomato), var(--butter));
-  display: grid; place-items: center; font-size: 13px;
-  box-shadow: 0 2px 6px rgba(0,0,0,.4);
+  width: 26px; height: 26px;
+  display: block; flex: none;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,.5));
 }
 nav { display: flex; gap: 4px; margin-left: auto; }
 nav a, nav button {
@@ -327,12 +332,22 @@ _SHELL = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0e0c0a">
 <title>Popcorn Check</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/static/favicon-32.png" sizes="32x32" type="image/png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="application-name" content="Popcorn Check">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Popcorn Check">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
 <style>{css}</style>
 </head>
 <body>
 <div class="topbar"><div class="topbar-inner">
-  <div class="brand"><span class="mark">🍿</span><span>Popcorn Check</span></div>
+  <div class="brand"><img class="mark" src="/static/mark.svg" alt="" width="26" height="26"><span>Popcorn Check</span></div>
   <nav>
     <a href="/" id="nav-home">RT Lookup</a>
     <a href="/yt" id="nav-yt">Movies</a>
@@ -662,6 +677,26 @@ more.addEventListener('click', () => { visible += PAGE; render(); });
 
 init();
 """
+
+
+# Browsers and iOS probe these at the site root whatever the <link> tags say,
+# so they get real routes rather than living only under /static.
+@app.get("/manifest.webmanifest", include_in_schema=False)
+def manifest() -> FileResponse:
+    return FileResponse(
+        _STATIC / "manifest.webmanifest", media_type="application/manifest+json"
+    )
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon() -> FileResponse:
+    return FileResponse(_STATIC / "favicon.ico", media_type="image/x-icon")
+
+
+@app.get("/apple-touch-icon.png", include_in_schema=False)
+@app.get("/apple-touch-icon-precomposed.png", include_in_schema=False)
+def apple_touch_icon() -> FileResponse:
+    return FileResponse(_STATIC / "apple-touch-icon.png", media_type="image/png")
 
 
 @app.get("/", response_class=HTMLResponse)

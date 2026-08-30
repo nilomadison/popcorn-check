@@ -13,6 +13,8 @@ household phone use — large tap targets and expandable "Movie summary" rows.
 | `ytv.py`          | Provider-aware JustWatch snapshots + RT score enrichment        |
 | `sync_ytv.py`     | Batch/nightly sync entry point                                 |
 | `pc.py`           | CLI Rotten Tomatoes lookup                                     |
+| `tools/make_icons.py` | Regenerates the icon set in `static/` (needs Pillow)       |
+| `static/`         | App icons + web manifest (committed; generated artwork)         |
 | `cache.db`        | RT lookup cache (search + movie scorecards)                    |
 | `yttv.db`         | Streaming-provider catalog, ratings, meta                      |
 
@@ -23,6 +25,23 @@ household phone use — large tap targets and expandable "Movie summary" rows.
 - `GET /api/lookup?q=<title>` — RT search candidates
 - `GET /api/movie?slug=<slug>` — full RT scorecard
 - `GET /api/yttv` — active provider catalog (one shot; filtering/sorting is client-side)
+- `GET /manifest.webmanifest`, `/favicon.ico`, `/apple-touch-icon.png`, `/static/*` — PWA icons
+
+## Icons
+
+The app installs to a phone home screen as "Popcorn Check" with a striped
+popcorn-bucket mark. The artwork is generated from one geometry definition,
+which emits both the SVG master and every PNG/ICO raster:
+
+```bash
+uv run --with pillow tools/make_icons.py   # rewrites static/
+```
+
+The in-app header mark is `static/mark.svg` — the same geometry, cropped to the
+artwork with the tile dropped, so the header and the home screen icon match.
+
+Pillow is a build-time dependency only — it is not needed to run the server.
+Outputs are committed, so this is only rerun when the artwork changes.
 
 ## Sync
 
