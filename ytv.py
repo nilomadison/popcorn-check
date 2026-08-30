@@ -56,6 +56,7 @@ PROVIDERS: dict[str, Provider] = {
         "amazon_prime", "Amazon Prime Video", "amp", JW_RESULT_WINDOW_LIMIT
     ),
     "peacock": Provider("peacock", "Peacock", "pct"),
+    "paramount_plus": Provider("paramount_plus", "Paramount+", "ppp"),
 }
 
 _last_jw_request_at = 0.0

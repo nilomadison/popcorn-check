@@ -75,13 +75,16 @@ on it with `systemctl list-timers popcorn-check-sync.timer` and
 installation path and log destination before adding it with `crontab -e`.
 
 The catalog contains the general US inventories that JustWatch associates with
-its YouTube TV, Netflix, Amazon Prime Video, and Peacock packages; it is not
-personalized for a subscriber's location, add-ons, recordings, or account
-entitlements. The Amazon Prime Video snapshot is intentionally limited to its
-first 1,900 movies by JustWatch popularity because JustWatch caps this
-unpartitioned result window.
+its YouTube TV, Netflix, Amazon Prime Video, Peacock, and Paramount+
+packages; it is not personalized for a subscriber's location, add-ons,
+recordings, or account entitlements. The Amazon Prime Video snapshot is
+intentionally limited to its first 1,900 movies by JustWatch popularity
+because JustWatch caps this unpartitioned result window.
 Peacock tracks JustWatch's `pct` package (Peacock Premium, the ad-supported
 tier); the separate Premium Plus package is a near-identical title set.
+Paramount+ tracks JustWatch's `ppp` package (Paramount Plus Premium); the
+separate Essential package is a subset of it, holding only two titles Premium
+lacks. Reseller channel packages (Amazon, Apple TV, Roku) are not tracked.
 Shared movies have one catalog/ratings row and one availability row per provider.
 JustWatch supplies baseline metadata and critic scores. Rotten Tomatoes is
 queried for audience scores and missing critic data.

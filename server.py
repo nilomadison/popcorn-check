@@ -274,13 +274,9 @@ details p { margin: 10px 0 0; color: var(--text-muted); font-size: .95rem; }
   background: var(--surface-2); color: var(--text);
 }
 .pchip .pmark {
-  display: inline-grid; place-items: center; width: 17px; height: 17px;
-  border-radius: 50%; font-size: .68rem; font-weight: 900; line-height: 1;
+  display: block; flex: none; width: 17px; height: 17px; border-radius: 50%;
 }
-.pchip.netflix .pmark { background: #fff; color: #e50914; }
-.pchip.youtube-tv .pmark { background: #ff0033; color: #fff; font-size: .58rem; }
-.pchip.amazon-prime .pmark { background: #00a8e1; color: #fff; }
-.pchip.peacock .pmark { background: #8b32a8; color: #fff; }
+.pmark-defs { display: none; }
 .tile .genres { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .gchip {
   font-size: .8rem; font-weight: 600; color: var(--text-muted);
@@ -433,10 +429,11 @@ window.addEventListener('scroll', updateBackToTop, {passive: true});
 updateBackToTop();
 const genreCatalog = __GENRE_CATALOG__;
 const providerCatalog = {
-  netflix: {label: 'Netflix', className: 'netflix', mark: 'N'},
-  youtube_tv: {label: 'YouTube TV', className: 'youtube-tv', mark: '▶'},
-  amazon_prime: {label: 'Prime', className: 'amazon-prime', mark: 'a'},
-  peacock: {label: 'Peacock', className: 'peacock', mark: 'P'}
+  netflix: {label: 'Netflix', symbol: 'pm-netflix'},
+  youtube_tv: {label: 'YouTube TV', symbol: 'pm-youtube-tv'},
+  amazon_prime: {label: 'Prime', symbol: 'pm-amazon-prime'},
+  peacock: {label: 'Peacock', symbol: 'pm-peacock'},
+  paramount_plus: {label: 'Paramount+', symbol: 'pm-paramount-plus'}
 };
 const NO_GENRE = '__no_genre__';
 app.innerHTML = `
@@ -603,8 +600,8 @@ function tile(x) {
   const providerChips = (x.providers || []).map(key => {
     const provider = providerCatalog[key];
     if (!provider) return '';
-    return `<span class="pchip ${provider.className}">
-      <span class="pmark" aria-hidden="true">${provider.mark}</span>${esc(provider.label)}
+    return `<span class="pchip">
+      <svg class="pmark" aria-hidden="true" focusable="false"><use href="#${provider.symbol}"/></svg>${esc(provider.label)}
     </span>`;
   }).join('');
   const genreChips = (x.genres || []).map(g => `<span class="gchip">${esc(g)}</span>`).join('');
@@ -673,6 +670,17 @@ def index() -> HTMLResponse:
         "</script>\n</body>", _RT_PAGE_JS + "\n</script>\n</body>"))
 
 
+# Provider marks, drawn once as a sprite the tile chips reference by id. Each
+# is the service's own icon-only logo, reduced to what still reads at 17px.
+_PROVIDER_SPRITE = """<svg class="pmark-defs" aria-hidden="true" focusable="false"><defs>
+  <symbol id="pm-netflix" viewBox="0 0 24 24"><circle cx="12" cy="12" r="12" fill="#000"/> <path d="M7 4h3.4l6.6 16H13.6z" fill="#B1060F"/> <rect x="7" y="4" width="3.4" height="16" fill="#E50914"/> <rect x="13.6" y="4" width="3.4" height="16" fill="#E50914"/></symbol>
+  <symbol id="pm-youtube-tv" viewBox="0 0 24 24"><circle cx="12" cy="12" r="12" fill="#FF0000"/> <path d="M9.6 7.8 17 12l-7.4 4.2z" fill="#fff"/></symbol>
+  <symbol id="pm-amazon-prime" viewBox="0 0 24 24"><circle cx="12" cy="12" r="12" fill="#00A8E1"/> <path d="M4.6 13.6c4.6 3.4 9.8 3.4 14.2.6" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/> <path d="M17.2 11.4 20.4 12l-1.1 3.1z" fill="#fff"/></symbol>
+  <symbol id="pm-peacock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="12" fill="#000"/><path d="M12 18.6 10.4 8.2Q12 5.6 13.6 8.2Z" fill="#FCB711" transform="rotate(-62.5 12 18.6)"/><path d="M12 18.6 10.4 8.2Q12 5.6 13.6 8.2Z" fill="#F37021" transform="rotate(-37.5 12 18.6)"/><path d="M12 18.6 10.4 8.2Q12 5.6 13.6 8.2Z" fill="#CC004C" transform="rotate(-12.5 12 18.6)"/><path d="M12 18.6 10.4 8.2Q12 5.6 13.6 8.2Z" fill="#6460AA" transform="rotate(12.5 12 18.6)"/><path d="M12 18.6 10.4 8.2Q12 5.6 13.6 8.2Z" fill="#0089D0" transform="rotate(37.5 12 18.6)"/><path d="M12 18.6 10.4 8.2Q12 5.6 13.6 8.2Z" fill="#0DB14B" transform="rotate(62.5 12 18.6)"/></symbol>
+  <symbol id="pm-paramount-plus" viewBox="0 0 24 24"><circle cx="12" cy="12" r="12" fill="#0064FF"/><path d="M12 6.6Q13.3 12.4 16.9 18.9L7.1 18.9Q10.7 12.4 12 6.6Z" fill="#fff"/><circle cx="3.17" cy="15.39" r="0.72" fill="#fff"/><circle cx="4.21" cy="13.34" r="0.72" fill="#fff"/><circle cx="5.71" cy="11.61" r="0.72" fill="#fff"/><circle cx="7.59" cy="10.30" r="0.72" fill="#fff"/><circle cx="9.73" cy="9.48" r="0.72" fill="#fff"/><circle cx="12.00" cy="9.20" r="0.72" fill="#fff"/><circle cx="14.27" cy="9.48" r="0.72" fill="#fff"/><circle cx="16.41" cy="10.30" r="0.72" fill="#fff"/><circle cx="18.29" cy="11.61" r="0.72" fill="#fff"/><circle cx="19.79" cy="13.34" r="0.72" fill="#fff"/><circle cx="20.83" cy="15.39" r="0.72" fill="#fff"/></symbol>
+</defs></svg>"""
+
+
 @app.get("/yt", response_class=HTMLResponse)
 def yt_page() -> HTMLResponse:
     genre_catalog = json.dumps([
@@ -681,6 +689,8 @@ def yt_page() -> HTMLResponse:
     ])
     yt_js = _YT_PAGE_JS.replace("__GENRE_CATALOG__", genre_catalog)
     return HTMLResponse(_SHELL.replace("{css}", _CSS).replace(
+        '<div class="wrap" id="app"></div>',
+        _PROVIDER_SPRITE + '\n<div class="wrap" id="app"></div>').replace(
         "</script>\n</body>", yt_js + "\n</script>\n</body>"))
 
 
