@@ -27,8 +27,8 @@ BG_OUTER = (14, 12, 10)      # #0e0c0a  (--bg)
 TOMATO = (229, 72, 77)       # #e5484d  (--tomato)
 TOMATO_DARK = (193, 57, 62)  # rim, for definition against the stripes
 CREAM = (247, 239, 226)      # #f7efe2  stripe white
-POP_LIGHT = (253, 246, 231)  # front kernels
-POP_SHADE = (232, 205, 152)  # back kernels, butter-tinted for depth
+POP_LIGHT = (252, 237, 194)  # front kernels, warmed toward --butter
+POP_SHADE = (228, 193, 128)  # back kernels, deeper butter for depth
 
 S = 512  # logical coordinate space
 
