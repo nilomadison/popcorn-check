@@ -280,6 +280,7 @@ details p { margin: 10px 0 0; color: var(--text-muted); font-size: .95rem; }
 .pchip.netflix .pmark { background: #fff; color: #e50914; }
 .pchip.youtube-tv .pmark { background: #ff0033; color: #fff; font-size: .58rem; }
 .pchip.amazon-prime .pmark { background: #00a8e1; color: #fff; }
+.pchip.peacock .pmark { background: #8b32a8; color: #fff; }
 .tile .genres { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .gchip {
   font-size: .8rem; font-weight: 600; color: var(--text-muted);
@@ -434,7 +435,8 @@ const genreCatalog = __GENRE_CATALOG__;
 const providerCatalog = {
   netflix: {label: 'Netflix', className: 'netflix', mark: 'N'},
   youtube_tv: {label: 'YouTube TV', className: 'youtube-tv', mark: '▶'},
-  amazon_prime: {label: 'Prime', className: 'amazon-prime', mark: 'a'}
+  amazon_prime: {label: 'Prime', className: 'amazon-prime', mark: 'a'},
+  peacock: {label: 'Peacock', className: 'peacock', mark: 'P'}
 };
 const NO_GENRE = '__no_genre__';
 app.innerHTML = `
