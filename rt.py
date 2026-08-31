@@ -7,8 +7,10 @@ Keys:
   search:<query>      -> JSON list of candidate titles
   movie:v2:<slug>     -> full scorecard JSON (incl. synopsis)
 
-A 7-day TTL applies to both; requests to Rotten Tomatoes are throttled so we
-don't hammer the site while backfilling provider catalogs.
+A 7-day TTL applies to both, except that an empty payload expires after
+EMPTY_CACHE_TTL_SECONDS so a change to RT's markup cannot mark a whole
+backfill as unmatched for a week. Requests to Rotten Tomatoes are throttled
+so we don't hammer the site while backfilling provider catalogs.
 """
 
 from __future__ import annotations
@@ -17,17 +19,19 @@ import html as html_mod
 import json
 import re
 import sqlite3
-import threading
 import time
 from typing import Any, Optional
 
 import requests
 from bs4 import BeautifulSoup
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+
+from http_client import ThrottledClient
 
 CACHE_DB = "cache.db"
 CACHE_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
+# Negative results are cached too, but only briefly: a parser break should
+# self-heal within hours instead of poisoning a full TTL of enrichment.
+EMPTY_CACHE_TTL_SECONDS = 6 * 60 * 60  # 6 hours
 
 BASE_URL = "https://www.rottentomatoes.com"
 SEARCH_URL = "https://www.rottentomatoes.com/search"
@@ -38,38 +42,13 @@ USER_AGENT = (
 
 # Minimum interval between outbound RT requests (seconds).
 _THROTTLE_SECONDS = 0.1
-_last_request_at = 0.0
-_throttle_lock = threading.Lock()
-_rate_limit_retries = 0
 
-
-def _session() -> requests.Session:
-    session = requests.Session()
-    retries = Retry(
-        total=4,
-        connect=4,
-        read=4,
-        status=4,
-        backoff_factor=0.75,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset({"GET"}),
-        respect_retry_after_header=True,
-    )
-    session.mount("https://", HTTPAdapter(max_retries=retries))
-    session.headers.update({"User-Agent": USER_AGENT})
-    return session
-
-
-_HTTP = _session()
-
-
-def _throttle() -> None:
-    global _last_request_at
-    with _throttle_lock:
-        wait = _THROTTLE_SECONDS - (time.time() - _last_request_at)
-        if wait > 0:
-            time.sleep(wait)
-        _last_request_at = time.time()
+_CLIENT = ThrottledClient(
+    min_interval=_THROTTLE_SECONDS,
+    methods=("GET",),
+    headers={"User-Agent": USER_AGENT},
+    timeout=(10, 20),
+)
 
 
 def _db() -> sqlite3.Connection:
@@ -92,12 +71,14 @@ def _cache_get(key: str, allow_expired: bool = False) -> Optional[Any]:
     if not row:
         return None
     payload, fetched_at = row
-    if not allow_expired and time.time() - fetched_at > CACHE_TTL_SECONDS:
-        return None
     try:
-        return json.loads(payload)
+        value = json.loads(payload)
     except (TypeError, ValueError):
         return None
+    ttl = CACHE_TTL_SECONDS if value else EMPTY_CACHE_TTL_SECONDS
+    if not allow_expired and time.time() - fetched_at > ttl:
+        return None
+    return value
 
 
 def _cache_set(key: str, value: Any) -> None:
@@ -113,20 +94,12 @@ def _cache_set(key: str, value: Any) -> None:
 
 
 def _get(url: str, **kwargs: Any) -> requests.Response:
-    global _rate_limit_retries
-    _throttle()
-    resp = _HTTP.get(url, timeout=(10, 20), **kwargs)
-    _rate_limit_retries += sum(
-        1 for retry in getattr(resp.raw.retries, "history", ())
-        if retry.status == 429
-    )
-    resp.raise_for_status()
-    return resp
+    return _CLIENT.get(url, **kwargs)
 
 
 def rate_limit_retry_count() -> int:
     """Return the number of HTTP 429 responses retried in this process."""
-    return _rate_limit_retries
+    return _CLIENT.rate_limit_retries
 
 
 def _to_int(value: Any) -> Optional[int]:

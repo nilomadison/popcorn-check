@@ -1,11 +1,14 @@
+import json
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import requests
 
+import http_client
 import rt
 import server as server_module
 import tmdb as tmdb_module
@@ -274,6 +277,39 @@ class CatalogSnapshotTests(unittest.TestCase):
         self.assertEqual(meta["catalog_inaccessible_total:limited"], "7")
         self.assertEqual(meta["catalog_snapshot_limit:limited"], "3")
 
+    def test_truncated_window_stops_at_the_reported_total(self) -> None:
+        # JustWatch keeps claiming hasNextPage past the last real page, so the
+        # unfiltered snapshot has to stop at the total it reported.
+        page = {
+            "totalCount": 3,
+            "edges": [node("1", "One"), node("2", "Two"), node("3", "Three")],
+            "pageInfo": {"hasNextPage": True, "endCursor": "Mw=="},
+        }
+        with patch.object(ytv, "_fetch_page", return_value=page) as fetch:
+            self.assertEqual(ytv.fetch_catalog(), 3)
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_catalog_api_tolerates_a_retired_provider_key(self) -> None:
+        # catalog_providers is only deactivated by that provider's own sync, so
+        # a key dropped from PROVIDERS stays active and must not 500 the page.
+        con = ytv._db()
+        con.execute(
+            "INSERT INTO catalog (jw_id,title,year) VALUES ('movie','Movie',2000)"
+        )
+        con.executemany(
+            "INSERT INTO catalog_providers "
+            "(jw_id,provider_key,active,popularity) VALUES ('movie',?,1,?)",
+            [("retired", 0), ("netflix", 1)],
+        )
+        con.commit()
+        con.close()
+
+        response = server_module.api_yttv()
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.body)
+        self.assertEqual(payload[0]["providers"], ["netflix", "retired"])
+
     def test_tmdb_enrichment_stores_validated_id_and_genres(self) -> None:
         con = ytv._db()
         con.execute(
@@ -492,23 +528,103 @@ class GenreNormalizationTests(unittest.TestCase):
                              set(ytv.GENRE_LABELS))
 
 
-class RottenTomatoesMatchingTests(unittest.TestCase):
-    def test_counts_retried_rate_limit_responses(self) -> None:
+class ThrottledClientTests(unittest.TestCase):
+    @staticmethod
+    def _response(status: int, retried: tuple[int, ...]) -> requests.Response:
         response = requests.Response()
-        response.status_code = 200
+        response.status_code = status
         response.raw = type("Raw", (), {
             "retries": type("Retries", (), {
-                "history": [type("Retry", (), {"status": 429})(),
-                            type("Retry", (), {"status": 503})(),
-                            type("Retry", (), {"status": 429})()]
+                "history": [type("Retry", (), {"status": s})() for s in retried]
             })()
         })()
-        with patch.object(rt, "_rate_limit_retries", 0), \
-             patch.object(rt, "_throttle"), \
-             patch.object(rt._HTTP, "get", return_value=response):
-            rt._get("https://example.test")
-            self.assertEqual(rt.rate_limit_retry_count(), 2)
+        return response
 
+    def test_counts_only_retried_rate_limit_responses(self) -> None:
+        client = http_client.ThrottledClient(min_interval=0)
+        response = self._response(200, (429, 503, 429))
+        with patch.object(
+            client._session, "request", return_value=response
+        ) as request:
+            self.assertIs(client.get("https://example.test"), response)
+        self.assertEqual(client.rate_limit_retries, 2)
+        self.assertEqual(request.call_args.args, ("GET", "https://example.test"))
+        self.assertEqual(
+            request.call_args.kwargs["timeout"], http_client.DEFAULT_TIMEOUT
+        )
+
+    def test_counts_accumulate_across_calls_including_failures(self) -> None:
+        # Counting happens before raise_for_status, so a run that ends in an
+        # error still reports the rate-limit backoff it paid for.
+        client = http_client.ThrottledClient(min_interval=0)
+        with patch.object(
+            client._session, "request", return_value=self._response(200, (429,))
+        ):
+            client.get("https://example.test")
+        with patch.object(
+            client._session, "request", return_value=self._response(500, (429, 429))
+        ):
+            with self.assertRaises(requests.HTTPError):
+                client.get("https://example.test")
+        self.assertEqual(client.rate_limit_retries, 3)
+
+    def test_rate_limited_client_waits_between_requests(self) -> None:
+        client = http_client.ThrottledClient(min_interval=0.05)
+        with patch.object(
+            client._session, "request", return_value=self._response(200, ())
+        ):
+            started = time.monotonic()
+            client.get("https://example.test")
+            client.get("https://example.test")
+        self.assertGreaterEqual(time.monotonic() - started, 0.05)
+
+
+class RottenTomatoesCacheTests(unittest.TestCase):
+    ROW = (
+        '<search-page-media-row release-year="2000">'
+        '<a data-qa="thumbnail-link" href="https://www.rottentomatoes.com/m/movie">'
+        '</a><a data-qa="info-name">Movie</a>'
+        '</search-page-media-row>'
+    )
+
+    @staticmethod
+    def _response(body: str) -> requests.Response:
+        response = requests.Response()
+        response.status_code = 200
+        response._content = body.encode()
+        return response
+
+    def test_empty_search_results_expire_on_the_short_ttl(self) -> None:
+        # An RT markup change must not mark a whole backfill unmatched for the
+        # full week, so an empty payload is cached only briefly.
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(rt, "CACHE_DB", str(Path(temp) / "cache.db")), \
+             patch.object(
+                 rt, "_get", return_value=self._response("<html></html>")
+             ) as get:
+            self.assertEqual(rt.search("ghost title"), [])
+            self.assertEqual(rt.search("ghost title"), [])
+            self.assertEqual(get.call_count, 1)
+            later = time.time() + rt.EMPTY_CACHE_TTL_SECONDS + 1
+            with patch("rt.time.time", return_value=later):
+                self.assertEqual(rt.search("ghost title"), [])
+            self.assertEqual(get.call_count, 2)
+
+    def test_found_search_results_keep_the_full_ttl(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(rt, "CACHE_DB", str(Path(temp) / "cache.db")), \
+             patch.object(
+                 rt, "_get", return_value=self._response(f"<html>{self.ROW}</html>")
+             ) as get:
+            found = rt.search("movie")
+            self.assertEqual([c["slug"] for c in found], ["movie"])
+            later = time.time() + rt.EMPTY_CACHE_TTL_SECONDS + 1
+            with patch("rt.time.time", return_value=later):
+                self.assertEqual(rt.search("movie"), found)
+            self.assertEqual(get.call_count, 1)
+
+
+class RottenTomatoesMatchingTests(unittest.TestCase):
     def test_movie_parses_media_scorecard_json(self) -> None:
         response = requests.Response()
         response.status_code = 200

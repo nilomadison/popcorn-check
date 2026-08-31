@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -12,12 +11,9 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-
 import rt
 import tmdb as tmdb_module
+from http_client import ThrottledClient
 
 YTTV_DB = "yttv.db"
 GRAPHQL_URL = "https://apis.justwatch.com/graphql"
@@ -58,9 +54,6 @@ PROVIDERS: dict[str, Provider] = {
     "peacock": Provider("peacock", "Peacock", "pct"),
     "paramount_plus": Provider("paramount_plus", "Paramount+", "ppp"),
 }
-
-_last_jw_request_at = 0.0
-_jw_throttle_lock = threading.Lock()
 
 # TMDb's official movie genre list (the fixed set returned by TMDb's
 # /genre/movie/list endpoint). Keys are stable API/filter values; labels
@@ -213,30 +206,11 @@ query PopularTitles(
 """
 
 
-def _session() -> requests.Session:
-    session = requests.Session()
-    retries = Retry(
-        total=4, connect=4, read=4, status=4, backoff_factor=0.75,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset({"POST"}), respect_retry_after_header=True,
-    )
-    session.mount("https://", HTTPAdapter(max_retries=retries))
-    session.headers.update(
-        {"User-Agent": USER_AGENT, "Content-Type": "application/json"}
-    )
-    return session
-
-
-_HTTP = _session()
-
-
-def _throttle_jw() -> None:
-    global _last_jw_request_at
-    with _jw_throttle_lock:
-        wait = JW_THROTTLE_SECONDS - (time.time() - _last_jw_request_at)
-        if wait > 0:
-            time.sleep(wait)
-        _last_jw_request_at = time.time()
+_CLIENT = ThrottledClient(
+    min_interval=JW_THROTTLE_SECONDS,
+    methods=("POST",),
+    headers={"User-Agent": USER_AGENT, "Content-Type": "application/json"},
+)
 
 
 def _ensure_columns(con: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
@@ -434,8 +408,7 @@ def _fetch_page(
     sort_by: str = "POPULAR",
 ) -> dict[str, Any]:
     config = _provider(provider)
-    _throttle_jw()
-    resp = _HTTP.post(
+    resp = _CLIENT.post(
         GRAPHQL_URL,
         json={
             "query": CATALOG_QUERY,
@@ -448,9 +421,7 @@ def _fetch_page(
                 "sortBy": sort_by,
             },
         },
-        timeout=(10, 30),
     )
-    resp.raise_for_status()
     data = resp.json()
     if data.get("errors"):
         raise RuntimeError(f"JustWatch GraphQL error: {data['errors']}")
@@ -564,14 +535,21 @@ def fetch_catalog(
             save_edges(
                 page.get("edges") or [], local_ids, strict_duplicates, result_limit
             )
-            if result_limit is not None and window_total is not None \
-                    and len(local_ids) == min(window_total, result_limit):
-                completed = True
-                break
-            if allow_truncated and expected_total is not None \
-                    and len(seen_ids) == expected_total:
-                completed = True
-                break
+            # Stop once the window's reported total (or the snapshot cap) is
+            # satisfied. JustWatch keeps reporting hasNextPage past the last
+            # real page, so a truncated window needs its own stop condition.
+            # Strict partition windows deliberately opt out: they must page to
+            # hasNextPage and then prove completeness below.
+            if window_total is not None and (
+                result_limit is not None or allow_truncated
+            ):
+                target = (
+                    window_total if result_limit is None
+                    else min(window_total, result_limit)
+                )
+                if len(local_ids) >= target:
+                    completed = True
+                    break
             page_info = page.get("pageInfo") or {}
             if not page_info.get("hasNextPage"):
                 completed = True

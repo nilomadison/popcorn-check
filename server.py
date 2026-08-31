@@ -360,6 +360,7 @@ const navHome = document.getElementById('nav-home');
 const navYt = document.getElementById('nav-yt');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const pct = n => (n == null || n === '') ? null : Number(n);
+// `sub` is interpolated as-is: callers escape it (some pass joined fragments).
 const meter = (label, val, cls, sub) => `
   <div class="meter ${cls}">
     <div class="k">${label}</div>
@@ -422,7 +423,7 @@ function renderMovie(m) {
       </div>
       <div class="scores">
         ${meter('Tomatometer', t, 'tomato', fresh ? `${esc(fresh)} · ${esc(sentiment)}` : '')}
-        ${meter('Popcornmeter', p, 'butter', m.audience_sentiment || '')}
+        ${meter('Popcornmeter', p, 'butter', esc(m.audience_sentiment || ''))}
       </div>
       ${m.synopsis ? `<details><summary>Movie summary</summary><p>${esc(m.synopsis)}</p></details>` : ''}
     </div>`;
@@ -778,12 +779,17 @@ def api_yttv() -> JSONResponse:
             "              WHERE cp.jw_id = c.jw_id AND cp.active = 1) "
             "ORDER BY COALESCE(popularity, 999999) ASC"
         ).fetchall()
+        # Rows can name a provider that has since been dropped from PROVIDERS:
+        # catalog_providers is only deactivated by that provider's own sync.
+        # Sort those last rather than failing the whole response; the page
+        # skips any key it has no mark for.
+        order = {key: index for index, key in enumerate(ytv_module.PROVIDERS)}
         out = []
         for row in rows:
             d = dict(row)
             d["providers"] = sorted(
                 (d.pop("provider_keys") or "").split(","),
-                key=lambda key: list(ytv_module.PROVIDERS).index(key),
+                key=lambda key: (order.get(key, len(order)), key),
             )
             def genres_from(column: str) -> list[str]:
                 try:
