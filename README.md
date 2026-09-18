@@ -128,6 +128,11 @@ TMDb equivalent (e.g. RT's Anime, Biography, Faith & Spirituality, Holiday,
 LGBTQ+; JustWatch's european, reality, sport) are dropped. Movies without
 genre data from any source appear under `No genre listed`.
 
+Runtime prefers validated TMDb over JustWatch's snapshot (both report
+minutes); RT's runtime is not collected for the catalog. Original language
+comes from validated TMDb only (JustWatch and RT expose neither), so it is
+populated on the same schedule as TMDb genres.
+
 ## Run
 
 ```bash

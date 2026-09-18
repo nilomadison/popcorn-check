@@ -269,7 +269,6 @@ details p { margin: 10px 0 0; color: var(--text-muted); font-size: .95rem; }
 }
 .tile .meta { min-width: 0; flex: 1; }
 .tile h3 { margin: 0 0 2px; font-size: 1.125rem; font-weight: 700; letter-spacing: -.01em; line-height: 1.3; }
-.tile .year { color: var(--text-muted); font-weight: 500; font-size: .9rem; letter-spacing: .01em; }
 .providers { display: flex; flex-wrap: wrap; gap: 6px; }
 .pchip {
   display: inline-flex; align-items: center; gap: 5px; min-height: 25px;
@@ -360,6 +359,18 @@ const navHome = document.getElementById('nav-home');
 const navYt = document.getElementById('nav-yt');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const pct = n => (n == null || n === '') ? null : Number(n);
+const formatRuntime = min => {
+  min = Number(min);
+  if (!min) return null;
+  const h = Math.floor(min / 60), m = min % 60;
+  return h ? `${h}h ${m}m` : `${m}m`;
+};
+let languageNames = null;
+try { languageNames = new Intl.DisplayNames(['en'], {type: 'language'}); } catch (e) {}
+const languageLabel = code => {
+  if (!code || code === 'en') return null;
+  try { return languageNames ? languageNames.of(code) : code; } catch (e) { return code; }
+};
 // `sub` is interpolated as-is: callers escape it (some pass joined fragments).
 const meter = (label, val, cls, sub) => `
   <div class="meter ${cls}">
@@ -621,6 +632,8 @@ function tile(x) {
     </span>`;
   }).join('');
   const genreChips = (x.genres || []).map(g => `<span class="gchip">${esc(g)}</span>`).join('');
+  const runtime = formatRuntime(x.runtime);
+  const language = languageLabel(x.language);
   const smeter = (label, icon, val, cls, unit = '%') => `
     <div class="smeter ${cls}" aria-label="${label}: ${val == null ? 'not rated' : unit === '%' ? `${val} percent` : `${val} out of 10`}">
       <span class="icon" aria-hidden="true">${icon}</span>
@@ -644,7 +657,8 @@ function tile(x) {
           ? `<img class="poster" src="${esc(x.poster)}" alt="" loading="lazy">`
           : '<div class="poster poster-placeholder" role="img" aria-label="Poster unavailable">Poster unavailable</div>'}
         <div class="meta">
-          <h3>${esc(x.title)}${x.year ? ` <span class="year">(${esc(x.year)})</span>` : ''}</h3>
+          <h3>${esc(x.title)}</h3>
+          ${x.year || runtime || language ? `<div class="muted small">${[x.year ? esc(x.year) : '', esc(runtime || ''), language ? `🌐 ${esc(language)}` : ''].filter(Boolean).join(' · ')}</div>` : ''}
           ${genreChips ? `<div class="genres">${genreChips}</div>` : ''}
           <div class="scores2">
             ${rtMeter}
@@ -767,6 +781,8 @@ def api_yttv() -> JSONResponse:
             "COALESCE(c.jw_tomatometer, r.tomatometer) AS tomatometer, "
             "r.popcornmeter, r.audience_score_type, c.imdb_score, "
             "c.jw_genres, r.genres AS rt_genres, c.tmdb_genres, "
+            "COALESCE(c.tmdb_runtime, c.jw_runtime) AS runtime, "
+            "c.tmdb_original_language AS language, "
             "COALESCE(c.jw_poster, r.poster) AS poster, "
             "COALESCE(r.synopsis, c.jw_synopsis) AS synopsis, "
             "(SELECT MIN(cp.popularity) FROM catalog_providers cp "

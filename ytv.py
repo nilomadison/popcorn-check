@@ -197,6 +197,7 @@ query PopularTitles(
             externalIds { imdbId tmdbId }
             scoring { tomatoMeter certifiedFresh imdbScore tmdbScore jwRating }
             genres { technicalName }
+            runtime
           }
         }
       }
@@ -251,6 +252,9 @@ def _db() -> sqlite3.Connection:
         "tmdb_attempt_count": "INTEGER NOT NULL DEFAULT 0",
         "tmdb_last_attempt_at": "TEXT",
         "tmdb_updated_at": "TEXT",
+        "jw_runtime": "INTEGER",
+        "tmdb_runtime": "INTEGER",
+        "tmdb_original_language": "TEXT",
     })
     con.execute(
         """CREATE TABLE IF NOT EXISTS ratings (
@@ -473,8 +477,8 @@ def fetch_catalog(
                     jw_id, title, year, active,
                     jw_tomatometer, jw_certified_fresh, jw_synopsis, jw_genres,
                     jw_poster, jw_url, imdb_id, tmdb_id, imdb_score, tmdb_score,
-                    jw_rating, jw_updated_at
-                ) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    jw_rating, jw_updated_at, jw_runtime
+                ) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(jw_id) DO UPDATE SET
                     title=excluded.title, year=excluded.year,
                     jw_tomatometer=excluded.jw_tomatometer,
@@ -483,7 +487,8 @@ def fetch_catalog(
                     jw_poster=excluded.jw_poster, jw_url=excluded.jw_url,
                     imdb_id=excluded.imdb_id, tmdb_id=excluded.tmdb_id,
                     imdb_score=excluded.imdb_score, tmdb_score=excluded.tmdb_score,
-                    jw_rating=excluded.jw_rating, jw_updated_at=excluded.jw_updated_at""",
+                    jw_rating=excluded.jw_rating, jw_updated_at=excluded.jw_updated_at,
+                    jw_runtime=excluded.jw_runtime""",
                 (jw_id, content["title"], content.get("originalReleaseYear"),
                  scoring.get("tomatoMeter"),
                  (1 if scoring.get("certifiedFresh") is True else
@@ -496,7 +501,7 @@ def fetch_catalog(
                  f"https://www.justwatch.com{full_path}" if full_path else None,
                  external.get("imdbId"), external.get("tmdbId"),
                  scoring.get("imdbScore"), scoring.get("tmdbScore"),
-                 scoring.get("jwRating"), now),
+                 scoring.get("jwRating"), now, content.get("runtime")),
             )
             con.execute(
                 """INSERT INTO catalog_providers (
@@ -960,7 +965,7 @@ def pending_tmdb_ids(
             FROM catalog c
             WHERE EXISTS (SELECT 1 FROM catalog_providers cp
                           WHERE cp.jw_id = c.jw_id AND cp.active = 1)
-              AND c.tmdb_genres IS NULL
+              AND (c.tmdb_genres IS NULL OR c.tmdb_runtime IS NULL)
               AND (c.tmdb_last_attempt_at IS NULL OR c.tmdb_last_attempt_at <= ?)
             ORDER BY (SELECT MIN(cp.popularity) FROM catalog_providers cp
                       WHERE cp.jw_id = c.jw_id AND cp.active = 1) ASC"""
@@ -1008,8 +1013,11 @@ def enrich_tmdb(limit: int = 250) -> dict[str, int]:
                 ]
                 con.execute(
                     """UPDATE catalog SET tmdb_validated_id=?, tmdb_genres=?,
+                       tmdb_runtime=?, tmdb_original_language=?,
                        tmdb_updated_at=? WHERE jw_id=?""",
-                    (str(result["id"]), json.dumps(genres), attempted_at, jw_id),
+                    (str(result["id"]), json.dumps(genres),
+                     result.get("runtime"), result.get("original_language"),
+                     attempted_at, jw_id),
                 )
             if (idx + 1) % 100 == 0:
                 con.commit()
